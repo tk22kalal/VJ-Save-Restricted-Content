@@ -37,7 +37,7 @@ async def show_main_settings_message(client: Client, message: Message, user_id: 
     
     await message.reply(text, reply_markup=keyboard)
 
-@Client.on_callback_query(filters.regex("^settings_"))
+@Client.on_callback_query(filters.regex("^(settings_|dest_|filter_|caption_|customword_|reset_)"))
 async def settings_callback(client: Client, callback: CallbackQuery):
     user_id = callback.from_user.id
     data = callback.data
@@ -45,10 +45,12 @@ async def settings_callback(client: Client, callback: CallbackQuery):
     
     if data == "settings_close":
         user_states.pop(user_id, None)
+        await callback.answer()
         await callback.message.delete()
         return
     
     elif data == "settings_destination":
+        await callback.answer()
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💬 Set Channel/Group", callback_data="dest_set")],
             [InlineKeyboardButton("🗑 Clear Destination", callback_data="dest_clear")],
@@ -63,6 +65,7 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         )
     
     elif data == "settings_filetype":
+        await callback.answer()
         current_filter = settings['file_type_filter']
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"{'✅' if current_filter == 'all' else '⬜'} All Types", callback_data="filter_all")],
@@ -81,6 +84,7 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         )
     
     elif data == "settings_caption":
+        await callback.answer()
         cleanup = settings['caption_cleanup']
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(
@@ -108,6 +112,7 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         )
     
     elif data == "settings_customwords":
+        await callback.answer()
         custom_words = settings['custom_remove_words']
         words_list = ', '.join(custom_words) if custom_words else 'None'
         keyboard = InlineKeyboardMarkup([
@@ -124,6 +129,7 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         )
     
     elif data == "settings_reset":
+        await callback.answer()
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Confirm Reset", callback_data="reset_confirm")],
             [InlineKeyboardButton("❌ Cancel", callback_data="settings_back")]
@@ -141,7 +147,8 @@ async def settings_callback(client: Client, callback: CallbackQuery):
     
     elif data == "settings_back":
         user_states.pop(user_id, None)
-        await show_main_settings(callback.message, user_id)
+        await callback.answer()
+        await show_main_settings_message(client, callback.message, user_id)
     
     elif data.startswith("filter_"):
         filter_type = data.replace("filter_", "")
@@ -205,9 +212,10 @@ async def settings_callback(client: Client, callback: CallbackQuery):
     elif data == "reset_confirm":
         await db.reset_user_settings(user_id)
         await callback.answer("✅ All settings reset to default!", show_alert=True)
-        await show_main_settings(callback.message, user_id)
+        await show_main_settings_message(client, callback.message, user_id)
     
     elif data == "dest_set":
+        await callback.answer()
         user_states[user_id] = 'awaiting_destination'
         await callback.message.edit_text(
             "**🗂 Set Destination Channel**\n\n"
@@ -217,7 +225,6 @@ async def settings_callback(client: Client, callback: CallbackQuery):
             "• -1001234567890\n\n"
             "Or send /cancel to go back."
         )
-        await callback.answer()
     
     elif data == "dest_clear":
         await db.set_destination_channel(user_id, None)
@@ -238,6 +245,7 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         )
     
     elif data == "customword_add":
+        await callback.answer()
         user_states[user_id] = 'awaiting_custom_word'
         await callback.message.edit_text(
             "**➕ Add Custom Word/Phrase**\n\n"
@@ -245,7 +253,6 @@ async def settings_callback(client: Client, callback: CallbackQuery):
             "Example: NextPulse\n\n"
             "Or send /cancel to go back."
         )
-        await callback.answer()
     
     elif data == "customword_clear":
         await db.clear_custom_remove_words(user_id)
@@ -303,30 +310,6 @@ async def handle_settings_input(client: Client, message: Message):
             "Use /settings to manage your custom words."
         )
         message.stop_propagation()
-
-async def show_main_settings(message: Message, user_id: int):
-    settings = await db.get_user_settings(user_id)
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🗂 Destination Channel", callback_data="settings_destination")],
-        [InlineKeyboardButton("🎞 File Type Filter", callback_data="settings_filetype")],
-        [InlineKeyboardButton("✂️ Caption Cleanup", callback_data="settings_caption")],
-        [InlineKeyboardButton("🧾 Custom Remove Words", callback_data="settings_customwords")],
-        [InlineKeyboardButton("🔄 Reset All Settings", callback_data="settings_reset")],
-        [InlineKeyboardButton("❌ Close", callback_data="settings_close")]
-    ])
-    
-    cleanup_status = "Enabled" if any(settings['caption_cleanup'].values()) else "Disabled"
-    
-    await message.edit_text(
-        "**⚙️ Settings Menu**\n\n"
-        "Configure your batch download and upload preferences:\n\n"
-        f"**Current Settings:**\n"
-        f"📍 Destination: {settings['destination_channel'] or 'Not Set'}\n"
-        f"🎞 File Type: {settings['file_type_filter'].title()}\n"
-        f"✂️ Caption Cleanup: {cleanup_status}\n"
-        f"🧾 Custom Words: {len(settings['custom_remove_words'])} word(s)",
-        reply_markup=keyboard
-    )
 
 def clean_caption(caption: str, settings: dict) -> str:
     if not caption:
