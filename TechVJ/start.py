@@ -18,6 +18,8 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from config import API_ID, API_HASH, ERROR_MESSAGE, LOGIN_SYSTEM, STRING_SESSION
 from database.db import db
 from TechVJ.strings import HELP_TXT
+from TechVJ.optimized_batch import batch_processor
+from TechVJ.settings import clean_caption
 from bot import TechVJUser
 
 
@@ -82,7 +84,8 @@ async def send_start(client: Client, message: Message):
             f"<b>👋 Hi {message.from_user.mention}, I am Save Restricted Content Bot.\n\n"
             "I can send you restricted content by its post link.\n\n"
             "For downloading restricted content use /login first (if login system is enabled).\n\n"
-            "Send me a Telegram post link (for example: https://t.me/somechannel/123) and I'll try to fetch it for you.</b>"
+            "Send me a Telegram post link (for example: https://t.me/somechannel/123) and I'll try to fetch it for you.\n\n"
+            "🚀 NEW: Use /settings to customize batch processing, caption cleanup, and more!</b>"
         ),
         reply_markup=reply_markup,
         reply_to_message_id=message.id,
@@ -161,6 +164,49 @@ async def save(client: Client, message: Message):
         batch_temp.IS_BATCH[message.from_user.id] = False
         
         total_messages = toID - fromID + 1
+        
+        user_settings = await db.get_user_settings(message.from_user.id)
+        use_optimized = total_messages > 5
+        
+        if use_optimized:
+            if LOGIN_SYSTEM == True:
+                user_data = await db.get_session(message.from_user.id)
+                if user_data is None:
+                    await message.reply("**For Downloading Restricted Content You Have To /login First.**")
+                    batch_temp.IS_BATCH[message.from_user.id] = True
+                    return
+                try:
+                    acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID)
+                    await acc.start()
+                except Exception:
+                    batch_temp.IS_BATCH[message.from_user.id] = True
+                    return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+            else:
+                if TechVJUser is None:
+                    batch_temp.IS_BATCH[message.from_user.id] = True
+                    await client.send_message(message.chat.id, f"**String Session is not Set**", reply_to_message_id=message.id)
+                    return
+                acc = TechVJUser
+            
+            try:
+                if chatid is None:
+                    if "https://t.me/c/" in message.text:
+                        chatid = int("-100" + datas[4])
+                    elif "https://t.me/b/" in message.text:
+                        chatid = datas[4]
+                    else:
+                        chatid = datas[3]
+                
+                await batch_processor.batch_process_with_concurrency(
+                    client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=3
+                )
+                batch_temp.IS_BATCH[message.from_user.id] = True
+                return
+            except Exception as e:
+                await message.reply(f"**Optimized mode failed, falling back to standard mode. Error: {e}**")
+                batch_temp.IS_BATCH[message.from_user.id] = True
+                return
+        
         await message.reply(f"**Starting batch download of {total_messages} message(s)...**")
         
         for msgid in range(fromID, toID + 1):
