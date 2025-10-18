@@ -17,20 +17,31 @@ class OptimizedBatchProcessor:
     
     async def process_message_concurrent(self, client: Client, acc, user_message: Message, chatid: int, msgid: int, user_settings: dict):
         try:
+            print(f"🔍 Processing message {msgid} in chat {chatid}")
+            
             # Use the same logic as old batch code to get messages
-            msg = await acc.get_messages(chatid, msgid)
-            if not msg or msg.empty:
-                return None, "Empty message", "unknown", 0, 0
+            try:
+                msg = await acc.get_messages(chatid, msgid)
+                if not msg or msg.empty:
+                    print(f"❌ Message {msgid} is empty or not found")
+                    return "error", "Empty message", "unknown", 0, 0
+            except Exception as e:
+                print(f"❌ Failed to get message {msgid}: {str(e)}")
+                return "error", f"Failed to get message: {str(e)}", "unknown", 0, 0
             
             destination = user_settings.get('destination_channel') or user_message.chat.id
             
             msg_type = self.get_message_type(msg)
             if not msg_type:
-                return None, "Unknown message type", "unknown", 0, 0
+                print(f"❌ Unknown message type for {msgid}")
+                return "error", "Unknown message type", "unknown", 0, 0
             
             file_filter = user_settings.get('file_type_filter', 'all')
             if file_filter != 'all' and not self.matches_filter(msg_type, file_filter):
+                print(f"🔍 Message {msgid} filtered out ({msg_type})")
                 return "filtered", f"Filtered out ({msg_type})", msg_type.lower(), 0, 0
+            
+            print(f"✅ Processing {msg_type} message {msgid}")
             
             # Handle text messages (same as old code)
             if msg_type == "Text":
@@ -43,8 +54,10 @@ class OptimizedBatchProcessor:
                         reply_to_message_id=user_message.id,
                         parse_mode=enums.ParseMode.HTML
                     )
+                    print(f"✅ Text message {msgid} sent successfully")
                     return "success", "Text sent", "text", 0, 0
                 except Exception as e:
+                    print(f"❌ Failed to send text {msgid}: {str(e)}")
                     return "error", f"Text send failed: {str(e)}", "text", 0, 0
             
             # Download file with progress tracking
@@ -53,17 +66,21 @@ class OptimizedBatchProcessor:
             # Create status file for download progress (like old code)
             status_file = f"{user_message.id}downstatus.txt"
             try:
+                print(f"⬇️ Downloading {msg_type} from message {msgid}")
                 file = await acc.download_media(
                     msg, 
                     progress=self.progress, 
                     progress_args=(user_message, "down")
                 )
+                print(f"✅ Download completed for message {msgid}")
             except Exception as e:
+                print(f"❌ Download failed for message {msgid}: {str(e)}")
                 return "error", f"Download failed: {str(e)}", msg_type.lower(), 0, 0
             
             download_time = time.time() - start_time
             
             if not file or not os.path.exists(file):
+                print(f"❌ Downloaded file not found for message {msgid}")
                 return "error", "Download failed - file not found", msg_type.lower(), 0, 0
             
             file_size = os.path.getsize(file) if os.path.exists(file) else 0
@@ -76,27 +93,33 @@ class OptimizedBatchProcessor:
             
             # Upload file with progress tracking
             start_time = time.time()
-            upload_result, upload_error = await self.upload_media(client, destination, file, msg, msg_type, caption, user_message)
+            print(f"⬆️ Uploading {msg_type} from message {msgid}")
+            upload_result, upload_error = await self.upload_media(client, destination, file, msg, msg_type, caption, user_message, acc)
             upload_time = time.time() - start_time
             upload_speed = file_size / upload_time if upload_time > 0 else 0
             
             # Cleanup
             if os.path.exists(file):
                 os.remove(file)
+                print(f"🧹 Cleaned up file for message {msgid}")
             if os.path.exists(f"{user_message.id}downstatus.txt"):
                 os.remove(f"{user_message.id}downstatus.txt")
             if os.path.exists(f"{user_message.id}upstatus.txt"):
                 os.remove(f"{user_message.id}upstatus.txt")
             
             if upload_result == "error":
+                print(f"❌ Upload failed for message {msgid}: {upload_error}")
                 return "error", f"Upload failed: {upload_error}", msg_type.lower(), download_speed, upload_speed
             
+            print(f"✅ Message {msgid} processed successfully")
             return "success", f"DL: {self.format_speed(download_speed)}, UL: {self.format_speed(upload_speed)}", msg_type.lower(), download_speed, upload_speed
             
         except FloodWait as e:
+            print(f"⏳ Flood wait for message {msgid}: {e.value}s")
             await asyncio.sleep(e.value)
             return await self.process_message_concurrent(client, acc, user_message, chatid, msgid, user_settings)
         except Exception as e:
+            print(f"❌ Unexpected error for message {msgid}: {str(e)}")
             return "error", f"Unexpected error: {str(e)}", "unknown", 0, 0
     
     def progress(self, current, total, message, type):
@@ -104,8 +127,10 @@ class OptimizedBatchProcessor:
         with open(f"{message.id}{type}status.txt", "w") as fileup:
             fileup.write(f"{current * 100 / total:.1f}%")
     
-    async def upload_media(self, client: Client, chat_id, file: str, msg, msg_type: str, caption: str, user_message: Message):
+    async def upload_media(self, client: Client, chat_id, file: str, msg, msg_type: str, caption: str, user_message: Message, acc):
         try:
+            print(f"📤 Uploading {msg_type} to {chat_id}")
+            
             # Use the same upload logic as old batch code
             if msg_type == "Document":
                 ph_path = None
@@ -126,6 +151,7 @@ class OptimizedBatchProcessor:
                         progress=self.progress,
                         progress_args=[user_message, "up"],
                     )
+                    print("✅ Document uploaded successfully")
                 except Exception as e:
                     return "error", f"Document send failed: {str(e)}"
                 
@@ -157,6 +183,7 @@ class OptimizedBatchProcessor:
                         progress=self.progress,
                         progress_args=[user_message, "up"],
                     )
+                    print("✅ Video uploaded successfully")
                 except Exception as e:
                     return "error", f"Video send failed: {str(e)}"
                 
@@ -175,12 +202,14 @@ class OptimizedBatchProcessor:
                         reply_to_message_id=user_message.id, 
                         parse_mode=enums.ParseMode.HTML
                     )
+                    print("✅ Animation uploaded successfully")
                 except Exception as e:
                     return "error", f"Animation send failed: {str(e)}"
 
             elif msg_type == "Sticker":
                 try:
                     await client.send_sticker(chat_id, file, reply_to_message_id=user_message.id)
+                    print("✅ Sticker uploaded successfully")
                 except Exception as e:
                     return "error", f"Sticker send failed: {str(e)}"
 
@@ -196,6 +225,7 @@ class OptimizedBatchProcessor:
                         progress=self.progress,
                         progress_args=[user_message, "up"],
                     )
+                    print("✅ Voice uploaded successfully")
                 except Exception as e:
                     return "error", f"Voice send failed: {str(e)}"
 
@@ -218,6 +248,7 @@ class OptimizedBatchProcessor:
                         progress=self.progress,
                         progress_args=[user_message, "up"],
                     )
+                    print("✅ Audio uploaded successfully")
                 except Exception as e:
                     return "error", f"Audio send failed: {str(e)}"
                 
@@ -236,11 +267,13 @@ class OptimizedBatchProcessor:
                         reply_to_message_id=user_message.id, 
                         parse_mode=enums.ParseMode.HTML
                     )
+                    print("✅ Photo uploaded successfully")
                 except Exception as e:
                     return "error", f"Photo send failed: {str(e)}"
 
             return "success", ""
         except Exception as e:
+            print(f"❌ Upload failed: {str(e)}")
             return "error", str(e)
     
     def get_message_type(self, msg):
@@ -320,153 +353,201 @@ class OptimizedBatchProcessor:
     async def batch_process_with_concurrency(self, client: Client, acc, user_message: Message, 
                                             chatid: int, from_id: int, to_id: int, 
                                             user_settings: dict, max_concurrent: int = 3):
-        total_messages = to_id - from_id + 1
-        processed = 0
-        successful = 0
-        failed = 0
-        filtered = 0
-        file_types_count = {'video': 0, 'document': 0, 'photo': 0, 'audio': 0, 'text': 0, 'other': 0}
-        self.download_speeds = []
-        self.upload_speeds = []
-        error_messages = []
-        
-        destination_info = user_settings.get('destination_channel') or "Bot Chat"
-        file_filter = user_settings.get('file_type_filter', 'all').title()
-        
-        progress_msg = await user_message.reply(
-            f"🚀 **Starting Optimized Batch Process**\n\n"
-            f"📊 Total messages: **{total_messages}**\n"
-            f"⚡ Concurrent tasks: **{max_concurrent}**\n"
-            f"📍 Destination: **{destination_info}**\n"
-            f"🎞 File filter: **{file_filter}**\n\n"
-            f"Initializing..."
-        )
-        
-        start_time = time.time()
-        last_update = start_time
-        
-        semaphore = asyncio.Semaphore(max_concurrent)
-        
-        async def process_with_semaphore(msgid):
-            nonlocal processed, successful, failed, filtered, last_update
+        try:
+            print(f"🚀 Starting batch process: {from_id} to {to_id} in chat {chatid}")
             
-            async with semaphore:
-                result, info, msg_type, dl_speed, ul_speed = await self.process_message_concurrent(
-                    client, acc, user_message, chatid, msgid, user_settings
-                )
-                
-                if dl_speed > 0:
-                    self.download_speeds.append(dl_speed)
-                if ul_speed > 0:
-                    self.upload_speeds.append(ul_speed)
-                
-                processed += 1
-                
-                if result == "success":
-                    successful += 1
-                    if msg_type in ['video', 'animation']:
-                        file_types_count['video'] += 1
-                    elif msg_type == 'document':
-                        file_types_count['document'] += 1
-                    elif msg_type == 'photo':
-                        file_types_count['photo'] += 1
-                    elif msg_type in ['audio', 'voice']:
-                        file_types_count['audio'] += 1
-                    elif msg_type == 'text':
-                        file_types_count['text'] += 1
-                    else:
-                        file_types_count['other'] += 1
-                elif result == "error":
-                    failed += 1
-                    if len(error_messages) < 5:  # Store first 5 errors
-                        error_messages.append(f"Msg {msgid}: {info}")
-                elif result == "filtered":
-                    filtered += 1
-                else:
-                    failed += 1
-                
-                current_time = time.time()
-                if current_time - last_update >= 2 or processed == total_messages:
-                    elapsed = current_time - start_time
-                    speed = processed / elapsed if elapsed > 0 else 0
-                    eta = (total_messages - processed) / speed if speed > 0 else 0
-                    percentage = (processed / total_messages * 100) if total_messages > 0 else 0
-                    
-                    avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
-                    avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
-                    
-                    progress_bar = self.create_progress_bar(processed, total_messages)
-                    
-                    status_text = (
-                        f"🚀 **Batch Processing** ({percentage:.1f}%)\n\n"
-                        f"{progress_bar}\n"
-                        f"📊 **{processed}/{total_messages}** files processed\n\n"
-                        f"✅ Successful: **{successful}**\n"
-                        f"❌ Failed: **{failed}**\n"
-                        f"🔍 Filtered: **{filtered}**\n\n"
-                    )
-                    
-                    if successful > 0:
-                        status_text += (
-                            f"📁 **Files by Type:**\n"
-                            f"🎬 Videos: {file_types_count['video']} | "
-                            f"📄 Docs: {file_types_count['document']}\n"
-                            f"🖼 Photos: {file_types_count['photo']} | "
-                            f"🎵 Audio: {file_types_count['audio']}\n"
-                            f"📝 Text: {file_types_count['text']}\n\n"
-                        )
-                    
-                    if avg_dl_speed > 0 or avg_ul_speed > 0:
-                        status_text += (
-                            f"⬇️ Download: **{self.format_speed(avg_dl_speed)}**\n"
-                            f"⬆️ Upload: **{self.format_speed(avg_ul_speed)}**\n"
-                        )
-                    
-                    status_text += f"⚡ Speed: **{speed:.1f} msg/s** | ⏱ ETA: **{int(eta)}s**"
-                    
-                    if failed > 0 and len(error_messages) > 0:
-                        status_text += f"\n\n❌ **Errors:** {error_messages[0]}"
-                    
-                    await progress_msg.edit_text(status_text)
-                    last_update = current_time
-        
-        tasks = [process_with_semaphore(msgid) for msgid in range(from_id, to_id + 1)]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        
-        total_time = time.time() - start_time
-        avg_speed = total_messages / total_time if total_time > 0 else 0
-        avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
-        avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
-        
-        final_message = (
-            f"✅ **Batch Processing Complete!**\n\n"
-            f"📊 **Total:** {total_messages} messages\n"
-            f"✅ Successful: **{successful}**\n"
-            f"❌ Failed: **{failed}**\n"
-            f"🔍 Filtered: **{filtered}**\n\n"
-        )
-        
-        if successful > 0:
-            final_message += (
-                f"📁 **Files Processed:**\n"
-                f"🎬 Videos: {file_types_count['video']}\n"
-                f"📄 Documents: {file_types_count['document']}\n"
-                f"🖼 Photos: {file_types_count['photo']}\n"
-                f"🎵 Audio: {file_types_count['audio']}\n"
-                f"📝 Text: {file_types_count['text']}\n\n"
+            total_messages = to_id - from_id + 1
+            processed = 0
+            successful = 0
+            failed = 0
+            filtered = 0
+            file_types_count = {'video': 0, 'document': 0, 'photo': 0, 'audio': 0, 'text': 0, 'other': 0}
+            self.download_speeds = []
+            self.upload_speeds = []
+            error_messages = []
+            
+            destination_info = user_settings.get('destination_channel') or "Bot Chat"
+            file_filter = user_settings.get('file_type_filter', 'all').title()
+            
+            progress_msg = await user_message.reply(
+                f"🚀 **Starting Optimized Batch Process**\n\n"
+                f"📊 Total messages: **{total_messages}**\n"
+                f"⚡ Concurrent tasks: **{max_concurrent}**\n"
+                f"📍 Destination: **{destination_info}**\n"
+                f"🎞 File filter: **{file_filter}**\n\n"
+                f"🔄 Initializing..."
             )
-        
-        final_message += (
-            f"📍 **Destination:** {destination_info}\n"
-            f"⬇️ **Avg Download:** {self.format_speed(avg_dl_speed)}\n"
-            f"⬆️ **Avg Upload:** {self.format_speed(avg_ul_speed)}\n"
-            f"⏱ **Time:** {int(total_time)}s | ⚡ **Speed:** {avg_speed:.2f} msg/s\n"
-        )
-        
-        if failed > 0 and error_messages:
-            final_message += f"\n**First few errors:**\n" + "\n".join(error_messages[:3])
-        
-        await progress_msg.edit_text(final_message)
+            
+            start_time = time.time()
+            last_update = start_time
+            
+            # Test one message first to ensure everything works
+            print("🧪 Testing first message...")
+            test_result, test_info, test_type, _, _ = await self.process_message_concurrent(
+                client, acc, user_message, chatid, from_id, user_settings
+            )
+            
+            if test_result != "success":
+                await progress_msg.edit_text(
+                    f"❌ **Test Failed**\n\n"
+                    f"First message ({from_id}) failed: {test_info}\n\n"
+                    f"Please check:\n"
+                    f"• Account permissions\n"
+                    f"• Channel/group access\n"
+                    f"• Message visibility"
+                )
+                return
+            
+            print("✅ Test message successful, starting batch...")
+            
+            await progress_msg.edit_text(
+                f"🚀 **Optimized Batch Process**\n\n"
+                f"📊 Total messages: **{total_messages}**\n"
+                f"✅ Test message successful\n"
+                f"🔄 Starting concurrent processing..."
+            )
+            
+            semaphore = asyncio.Semaphore(max_concurrent)
+            
+            async def process_with_semaphore(msgid):
+                nonlocal processed, successful, failed, filtered, last_update
+                
+                async with semaphore:
+                    try:
+                        result, info, msg_type, dl_speed, ul_speed = await self.process_message_concurrent(
+                            client, acc, user_message, chatid, msgid, user_settings
+                        )
+                        
+                        if dl_speed > 0:
+                            self.download_speeds.append(dl_speed)
+                        if ul_speed > 0:
+                            self.upload_speeds.append(ul_speed)
+                        
+                        processed += 1
+                        
+                        if result == "success":
+                            successful += 1
+                            if msg_type in ['video', 'animation']:
+                                file_types_count['video'] += 1
+                            elif msg_type == 'document':
+                                file_types_count['document'] += 1
+                            elif msg_type == 'photo':
+                                file_types_count['photo'] += 1
+                            elif msg_type in ['audio', 'voice']:
+                                file_types_count['audio'] += 1
+                            elif msg_type == 'text':
+                                file_types_count['text'] += 1
+                            else:
+                                file_types_count['other'] += 1
+                        elif result == "error":
+                            failed += 1
+                            if len(error_messages) < 5:  # Store first 5 errors
+                                error_messages.append(f"Msg {msgid}: {info}")
+                        elif result == "filtered":
+                            filtered += 1
+                        else:
+                            failed += 1
+                        
+                        current_time = time.time()
+                        if current_time - last_update >= 2 or processed == total_messages:
+                            elapsed = current_time - start_time
+                            speed = processed / elapsed if elapsed > 0 else 0
+                            eta = (total_messages - processed) / speed if speed > 0 else 0
+                            percentage = (processed / total_messages * 100) if total_messages > 0 else 0
+                            
+                            avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
+                            avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
+                            
+                            progress_bar = self.create_progress_bar(processed, total_messages)
+                            
+                            status_text = (
+                                f"🚀 **Batch Processing** ({percentage:.1f}%)\n\n"
+                                f"{progress_bar}\n"
+                                f"📊 **{processed}/{total_messages}** files processed\n\n"
+                                f"✅ Successful: **{successful}**\n"
+                                f"❌ Failed: **{failed}**\n"
+                                f"🔍 Filtered: **{filtered}**\n\n"
+                            )
+                            
+                            if successful > 0:
+                                status_text += (
+                                    f"📁 **Files by Type:**\n"
+                                    f"🎬 Videos: {file_types_count['video']} | "
+                                    f"📄 Docs: {file_types_count['document']}\n"
+                                    f"🖼 Photos: {file_types_count['photo']} | "
+                                    f"🎵 Audio: {file_types_count['audio']}\n"
+                                    f"📝 Text: {file_types_count['text']}\n\n"
+                                )
+                            
+                            if avg_dl_speed > 0 or avg_ul_speed > 0:
+                                status_text += (
+                                    f"⬇️ Download: **{self.format_speed(avg_dl_speed)}**\n"
+                                    f"⬆️ Upload: **{self.format_speed(avg_ul_speed)}**\n"
+                                )
+                            
+                            status_text += f"⚡ Speed: **{speed:.1f} msg/s** | ⏱ ETA: **{int(eta)}s**"
+                            
+                            if failed > 0 and len(error_messages) > 0:
+                                status_text += f"\n\n❌ **Last Error:** {error_messages[-1]}"
+                            
+                            await progress_msg.edit_text(status_text)
+                            last_update = current_time
+                    except Exception as e:
+                        print(f"❌ Task error for message {msgid}: {str(e)}")
+                        processed += 1
+                        failed += 1
+            
+            # Create and run tasks
+            tasks = []
+            for msgid in range(from_id, to_id + 1):
+                task = asyncio.create_task(process_with_semaphore(msgid))
+                tasks.append(task)
+            
+            print(f"📋 Created {len(tasks)} tasks, waiting for completion...")
+            
+            # Wait for all tasks to complete
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            print("✅ All tasks completed")
+            
+            total_time = time.time() - start_time
+            avg_speed = total_messages / total_time if total_time > 0 else 0
+            avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
+            avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
+            
+            final_message = (
+                f"✅ **Batch Processing Complete!**\n\n"
+                f"📊 **Total:** {total_messages} messages\n"
+                f"✅ Successful: **{successful}**\n"
+                f"❌ Failed: **{failed}**\n"
+                f"🔍 Filtered: **{filtered}**\n\n"
+            )
+            
+            if successful > 0:
+                final_message += (
+                    f"📁 **Files Processed:**\n"
+                    f"🎬 Videos: {file_types_count['video']}\n"
+                    f"📄 Documents: {file_types_count['document']}\n"
+                    f"🖼 Photos: {file_types_count['photo']}\n"
+                    f"🎵 Audio: {file_types_count['audio']}\n"
+                    f"📝 Text: {file_types_count['text']}\n\n"
+                )
+            
+            final_message += (
+                f"📍 **Destination:** {destination_info}\n"
+                f"⬇️ **Avg Download:** {self.format_speed(avg_dl_speed)}\n"
+                f"⬆️ **Avg Upload:** {self.format_speed(avg_ul_speed)}\n"
+                f"⏱ **Time:** {int(total_time)}s | ⚡ **Speed:** {avg_speed:.2f} msg/s\n"
+            )
+            
+            if failed > 0 and error_messages:
+                final_message += f"\n**First few errors:**\n" + "\n".join(error_messages[:3])
+            
+            await progress_msg.edit_text(final_message)
+            
+        except Exception as e:
+            print(f"❌ Batch process failed: {str(e)}")
+            await user_message.reply(f"❌ **Batch process failed:** {str(e)}")
     
     def create_progress_bar(self, current: int, total: int, length: int = 10) -> str:
         percent = current / total if total > 0 else 0
