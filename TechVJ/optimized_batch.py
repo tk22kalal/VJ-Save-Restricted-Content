@@ -15,12 +15,29 @@ class OptimizedBatchProcessor:
         self.upload_speeds = []
         self.current_file = 0
     
-    async def process_message_concurrent(self, client: Client, acc, user_message: Message, chatid: int, msgid: int, user_settings: dict):
+    async def process_message_concurrent(self, client: Client, acc, user_message: Message, chatid: int, msgid: int, user_settings: dict, topic_id: int = None):
         try:
             # Get message using the account
             msg = await acc.get_messages(chatid, msgid)
             if not msg or msg.empty:
                 return None, "Empty message", "unknown", 0, 0
+            
+            # Filter by topic/subgroup if specified
+            if topic_id is not None:
+                msg_topic_id = None
+                if hasattr(msg, 'reply_to_message_id') and msg.reply_to_message_id:
+                    try:
+                        reply_msg = await acc.get_messages(chatid, msg.reply_to_message_id)
+                        if hasattr(reply_msg, 'message_thread_id'):
+                            msg_topic_id = reply_msg.message_thread_id
+                    except:
+                        pass
+                elif hasattr(msg, 'message_thread_id'):
+                    msg_topic_id = msg.message_thread_id
+                
+                # Skip if message is not from the requested topic
+                if msg_topic_id != topic_id:
+                    return "filtered", f"Wrong topic (expected {topic_id}, got {msg_topic_id})", "unknown", 0, 0
             
             # ALWAYS use user's chat as destination for now to avoid PEER_ID_INVALID
             destination = user_message.chat.id
@@ -77,7 +94,7 @@ class OptimizedBatchProcessor:
             
             # Upload file
             start_time = time.time()
-            upload_result, upload_error = await self.upload_media(client, destination, file, msg, msg_type, caption, user_message)
+            upload_result, upload_error = await self.upload_media(client, acc, destination, file, msg, msg_type, caption, user_message)
             upload_time = time.time() - start_time
             upload_speed = file_size / upload_time if upload_time > 0 else 0
             
@@ -96,7 +113,7 @@ class OptimizedBatchProcessor:
             
         except FloodWait as e:
             await asyncio.sleep(e.value)
-            return await self.process_message_concurrent(client, acc, user_message, chatid, msgid, user_settings)
+            return await self.process_message_concurrent(client, acc, user_message, chatid, msgid, user_settings, topic_id)
         except Exception as e:
             return "error", f"Unexpected error: {str(e)}", "unknown", 0, 0
     
@@ -105,7 +122,7 @@ class OptimizedBatchProcessor:
         with open(f"{message.id}{type}status.txt", "w") as fileup:
             fileup.write(f"{current * 100 / total:.1f}%")
     
-    async def upload_media(self, client: Client, chat_id, file: str, msg, msg_type: str, caption: str, user_message: Message):
+    async def upload_media(self, client: Client, acc, chat_id, file: str, msg, msg_type: str, caption: str, user_message: Message):
         try:
             # Use the same upload logic as old batch code but ensure we're sending to valid chat
             if msg_type == "Document":
@@ -334,7 +351,7 @@ class OptimizedBatchProcessor:
     
     async def batch_process_with_concurrency(self, client: Client, acc, user_message: Message, 
                                             chatid: int, from_id: int, to_id: int, 
-                                            user_settings: dict, max_concurrent: int = 3):
+                                            user_settings: dict, max_concurrent: int = 3, topic_id: int = None):
         total_messages = to_id - from_id + 1
         processed = 0
         successful = 0
@@ -349,14 +366,36 @@ class OptimizedBatchProcessor:
         destination_info = "Your chat (safe mode)"
         
         file_filter = user_settings.get('file_type_filter', 'all').title()
+        topic_info = f" | 🎯 Topic: {topic_id}" if topic_id is not None else ""
+        
+        # Test first message to verify permissions and avoid slow starts
+        test_msg = await user_message.reply("🔍 Testing permissions...")
+        try:
+            first_msg = await acc.get_messages(chatid, from_id)
+            if not first_msg or first_msg.empty:
+                await test_msg.edit_text("❌ Cannot access messages. Check if:\n• The account has joined the chat\n• Messages are not deleted")
+                return
+            await test_msg.delete()
+        except ChannelPrivate:
+            await test_msg.edit_text("❌ Chat is private and account hasn't joined. Send invite link first using the old batch method.")
+            return
+        except UserNotParticipant:
+            await test_msg.edit_text("❌ Account is not a participant of this chat. Join the chat first.")
+            return
+        except PeerIdInvalid:
+            await test_msg.edit_text("❌ Invalid chat ID. Please check the link.")
+            return
+        except Exception as e:
+            await test_msg.edit_text(f"❌ Permission test failed: {str(e)}")
+            return
         
         progress_msg = await user_message.reply(
             f"🚀 **Starting Optimized Batch Process**\n\n"
             f"📊 Total messages: **{total_messages}**\n"
             f"⚡ Concurrent tasks: **{max_concurrent}**\n"
-            f"📍 Destination: **{destination_info}**\n"
+            f"📍 Destination: **{destination_info}**{topic_info}\n"
             f"🎞 File filter: **{file_filter}**\n\n"
-            f"Initializing..."
+            f"Processing..."
         )
         
         start_time = time.time()
@@ -369,7 +408,7 @@ class OptimizedBatchProcessor:
             
             async with semaphore:
                 result, info, msg_type, dl_speed, ul_speed = await self.process_message_concurrent(
-                    client, acc, user_message, chatid, msgid, user_settings
+                    client, acc, user_message, chatid, msgid, user_settings, topic_id
                 )
                 
                 if dl_speed > 0:
