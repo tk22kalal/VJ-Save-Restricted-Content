@@ -799,7 +799,7 @@ def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
                 os.remove(ph_path)
             except:
                 pass
-
+                
     # Animation (gif)
     elif msg_type == "Animation":
         try:
