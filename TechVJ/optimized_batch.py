@@ -1,36 +1,37 @@
 import os
 import asyncio
 import time
+import re
 from pyrogram import Client, enums
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, ChannelPrivate, UserNotParticipant, ChatWriteForbidden, PeerIdInvalid
 from database.db import db
-from TechVJ.settings import clean_caption
+from TechVJ.settings import clean_caption, clean_filename
 
 class OptimizedBatchProcessor:
     def __init__(self):
-        self.processed_count = 0
-        self.success_count = 0
-        self.failed_count = 0
-        
-    async def process_single_message(self, client: Client, acc, user_message: Message, chatid: int, msgid: int, user_settings: dict):
-        """Process a single message - similar to old batch code but with settings"""
+        self.active_tasks = {}
+        self.download_speeds = []
+        self.upload_speeds = []
+        self.current_file = 0
+    
+    async def process_message_concurrent(self, client: Client, acc, user_message: Message, chatid: int, msgid: int, user_settings: dict):
         try:
-            # Get the message
+            # Get message using the account
             msg = await acc.get_messages(chatid, msgid)
             if not msg or msg.empty:
-                return "error", "Message not found", "unknown"
+                return None, "Empty message", "unknown", 0, 0
             
-            # Check file filter
+            # ALWAYS use user's chat as destination for now to avoid PEER_ID_INVALID
+            destination = user_message.chat.id
+            
             msg_type = self.get_message_type(msg)
             if not msg_type:
-                return "error", "Unknown message type", "unknown"
+                return None, "Unknown message type", "unknown", 0, 0
             
             file_filter = user_settings.get('file_type_filter', 'all')
             if file_filter != 'all' and not self.matches_filter(msg_type, file_filter):
-                return "filtered", f"Filtered out ({msg_type})", msg_type.lower()
-            
-            destination = user_settings.get('destination_channel') or user_message.chat.id
+                return "filtered", f"Filtered out ({msg_type})", msg_type.lower(), 0, 0
             
             # Handle text messages
             if msg_type == "Text":
@@ -43,141 +44,222 @@ class OptimizedBatchProcessor:
                         reply_to_message_id=user_message.id,
                         parse_mode=enums.ParseMode.HTML
                     )
-                    return "success", "Text sent", "text"
+                    return "success", "Text sent", "text", 0, 0
                 except Exception as e:
-                    return "error", f"Text send failed: {str(e)}", "text"
+                    return "error", f"Text send failed: {str(e)}", "text", 0, 0
             
-            # For media messages, use the old reliable method
-            return await self.handle_media_message(client, acc, user_message, msg, msg_type, destination, user_settings)
+            # Download file
+            start_time = time.time()
             
-        except FloodWait as e:
-            await asyncio.sleep(e.value)
-            return await self.process_single_message(client, acc, user_message, chatid, msgid, user_settings)
-        except Exception as e:
-            return "error", f"Unexpected error: {str(e)}", "unknown"
-    
-    async def handle_media_message(self, client: Client, acc, user_message: Message, msg, msg_type: str, destination: int, user_settings: dict):
-        """Handle media messages using the proven old method"""
-        try:
-            # Download the file
-            file = await acc.download_media(msg)
+            # Create status file for download progress
+            status_file = f"{user_message.id}downstatus.txt"
+            try:
+                file = await acc.download_media(
+                    msg, 
+                    progress=self.progress, 
+                    progress_args=(user_message, "down")
+                )
+            except Exception as e:
+                return "error", f"Download failed: {str(e)}", msg_type.lower(), 0, 0
+            
+            download_time = time.time() - start_time
+            
             if not file or not os.path.exists(file):
-                return "error", "Download failed", msg_type.lower()
+                return "error", "Download failed - file not found", msg_type.lower(), 0, 0
+            
+            file_size = os.path.getsize(file) if os.path.exists(file) else 0
+            download_speed = file_size / download_time if download_time > 0 else 0
             
             # Clean caption
             caption = msg.caption if msg.caption else None
             if caption:
                 caption = clean_caption(caption, user_settings)
             
-            # Upload based on message type
+            # Upload file
+            start_time = time.time()
+            upload_result, upload_error = await self.upload_media(client, destination, file, msg, msg_type, caption, user_message)
+            upload_time = time.time() - start_time
+            upload_speed = file_size / upload_time if upload_time > 0 else 0
+            
+            # Cleanup
+            if os.path.exists(file):
+                os.remove(file)
+            if os.path.exists(f"{user_message.id}downstatus.txt"):
+                os.remove(f"{user_message.id}downstatus.txt")
+            if os.path.exists(f"{user_message.id}upstatus.txt"):
+                os.remove(f"{user_message.id}upstatus.txt")
+            
+            if upload_result == "error":
+                return "error", f"Upload failed: {upload_error}", msg_type.lower(), download_speed, upload_speed
+            
+            return "success", f"DL: {self.format_speed(download_speed)}, UL: {self.format_speed(upload_speed)}", msg_type.lower(), download_speed, upload_speed
+            
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            return await self.process_message_concurrent(client, acc, user_message, chatid, msgid, user_settings)
+        except Exception as e:
+            return "error", f"Unexpected error: {str(e)}", "unknown", 0, 0
+    
+    def progress(self, current, total, message, type):
+        """Progress callback like old batch code"""
+        with open(f"{message.id}{type}status.txt", "w") as fileup:
+            fileup.write(f"{current * 100 / total:.1f}%")
+    
+    async def upload_media(self, client: Client, chat_id, file: str, msg, msg_type: str, caption: str, user_message: Message):
+        try:
+            # Use the same upload logic as old batch code but ensure we're sending to valid chat
             if msg_type == "Document":
                 ph_path = None
                 try:
                     if msg.document.thumbs:
                         ph_path = await acc.download_media(msg.document.thumbs[0].file_id)
-                except:
-                    pass
-                
-                await client.send_document(
-                    destination,
-                    file,
-                    thumb=ph_path,
-                    caption=caption,
-                    reply_to_message_id=user_message.id,
-                    parse_mode=enums.ParseMode.HTML
-                )
+                except Exception:
+                    ph_path = None
+
+                try:
+                    await client.send_document(
+                        chat_id,
+                        file,
+                        thumb=ph_path,
+                        caption=caption,
+                        reply_to_message_id=user_message.id,
+                        parse_mode=enums.ParseMode.HTML,
+                        progress=self.progress,
+                        progress_args=[user_message, "up"],
+                    )
+                except PeerIdInvalid:
+                    return "error", "Invalid destination channel - bot cannot access it"
+                except Exception as e:
+                    return "error", f"Document send failed: {str(e)}"
                 
                 if ph_path and os.path.exists(ph_path):
-                    os.remove(ph_path)
+                    try:
+                        os.remove(ph_path)
+                    except:
+                        pass
 
             elif msg_type == "Video":
                 ph_path = None
                 try:
                     if msg.video.thumbs:
                         ph_path = await acc.download_media(msg.video.thumbs[0].file_id)
-                except:
-                    pass
-                
-                await client.send_video(
-                    destination,
-                    file,
-                    duration=getattr(msg.video, "duration", None),
-                    width=getattr(msg.video, "width", None),
-                    height=getattr(msg.video, "height", None),
-                    thumb=ph_path,
-                    caption=caption,
-                    reply_to_message_id=user_message.id,
-                    parse_mode=enums.ParseMode.HTML
-                )
+                except Exception:
+                    ph_path = None
+
+                try:
+                    await client.send_video(
+                        chat_id,
+                        file,
+                        duration=getattr(msg.video, "duration", None),
+                        width=getattr(msg.video, "width", None),
+                        height=getattr(msg.video, "height", None),
+                        thumb=ph_path,
+                        caption=caption,
+                        reply_to_message_id=user_message.id,
+                        parse_mode=enums.ParseMode.HTML,
+                        progress=self.progress,
+                        progress_args=[user_message, "up"],
+                    )
+                except PeerIdInvalid:
+                    return "error", "Invalid destination channel - bot cannot access it"
+                except Exception as e:
+                    return "error", f"Video send failed: {str(e)}"
                 
                 if ph_path and os.path.exists(ph_path):
-                    os.remove(ph_path)
+                    try:
+                        os.remove(ph_path)
+                    except:
+                        pass
 
             elif msg_type == "Animation":
-                await client.send_animation(
-                    destination, 
-                    file, 
-                    caption=caption, 
-                    reply_to_message_id=user_message.id, 
-                    parse_mode=enums.ParseMode.HTML
-                )
+                try:
+                    await client.send_animation(
+                        chat_id, 
+                        file, 
+                        caption=caption, 
+                        reply_to_message_id=user_message.id, 
+                        parse_mode=enums.ParseMode.HTML
+                    )
+                except PeerIdInvalid:
+                    return "error", "Invalid destination channel - bot cannot access it"
+                except Exception as e:
+                    return "error", f"Animation send failed: {str(e)}"
 
             elif msg_type == "Sticker":
-                await client.send_sticker(destination, file, reply_to_message_id=user_message.id)
+                try:
+                    await client.send_sticker(chat_id, file, reply_to_message_id=user_message.id)
+                except PeerIdInvalid:
+                    return "error", "Invalid destination channel - bot cannot access it"
+                except Exception as e:
+                    return "error", f"Sticker send failed: {str(e)}"
 
             elif msg_type == "Voice":
-                await client.send_voice(
-                    destination,
-                    file,
-                    caption=caption,
-                    caption_entities=getattr(msg, "caption_entities", None),
-                    reply_to_message_id=user_message.id,
-                    parse_mode=enums.ParseMode.HTML
-                )
+                try:
+                    await client.send_voice(
+                        chat_id,
+                        file,
+                        caption=caption,
+                        caption_entities=getattr(msg, "caption_entities", None),
+                        reply_to_message_id=user_message.id,
+                        parse_mode=enums.ParseMode.HTML,
+                        progress=self.progress,
+                        progress_args=[user_message, "up"],
+                    )
+                except PeerIdInvalid:
+                    return "error", "Invalid destination channel - bot cannot access it"
+                except Exception as e:
+                    return "error", f"Voice send failed: {str(e)}"
 
             elif msg_type == "Audio":
                 ph_path = None
                 try:
                     if getattr(msg.audio, "thumbs", None):
                         ph_path = await acc.download_media(msg.audio.thumbs[0].file_id)
-                except:
-                    pass
-                
-                await client.send_audio(
-                    destination,
-                    file,
-                    thumb=ph_path,
-                    caption=caption,
-                    reply_to_message_id=user_message.id,
-                    parse_mode=enums.ParseMode.HTML
-                )
+                except Exception:
+                    ph_path = None
+
+                try:
+                    await client.send_audio(
+                        chat_id,
+                        file,
+                        thumb=ph_path,
+                        caption=caption,
+                        reply_to_message_id=user_message.id,
+                        parse_mode=enums.ParseMode.HTML,
+                        progress=self.progress,
+                        progress_args=[user_message, "up"],
+                    )
+                except PeerIdInvalid:
+                    return "error", "Invalid destination channel - bot cannot access it"
+                except Exception as e:
+                    return "error", f"Audio send failed: {str(e)}"
                 
                 if ph_path and os.path.exists(ph_path):
-                    os.remove(ph_path)
+                    try:
+                        os.remove(ph_path)
+                    except:
+                        pass
 
             elif msg_type == "Photo":
-                await client.send_photo(
-                    destination, 
-                    file, 
-                    caption=caption, 
-                    reply_to_message_id=user_message.id, 
-                    parse_mode=enums.ParseMode.HTML
-                )
-            
-            # Cleanup
-            if os.path.exists(file):
-                os.remove(file)
-                
-            return "success", f"{msg_type} sent", msg_type.lower()
-            
+                try:
+                    await client.send_photo(
+                        chat_id, 
+                        file, 
+                        caption=caption, 
+                        reply_to_message_id=user_message.id, 
+                        parse_mode=enums.ParseMode.HTML
+                    )
+                except PeerIdInvalid:
+                    return "error", "Invalid destination channel - bot cannot access it"
+                except Exception as e:
+                    return "error", f"Photo send failed: {str(e)}"
+
+            return "success", ""
         except Exception as e:
-            # Cleanup on error
-            if 'file' in locals() and os.path.exists(file):
-                os.remove(file)
-            return "error", f"Media processing failed: {str(e)}", msg_type.lower()
+            return "error", str(e)
     
     def get_message_type(self, msg):
-        """Same reliable message type detection"""
+        """Same message type detection as old code"""
         try:
             if getattr(msg, "document", None) and getattr(msg.document, "file_id", None):
                 return "Document"
@@ -242,94 +324,136 @@ class OptimizedBatchProcessor:
             return msg_type in ['Audio', 'Voice']
         return False
     
+    def format_speed(self, bytes_per_second: float) -> str:
+        if bytes_per_second < 1024:
+            return f"{bytes_per_second:.1f} B/s"
+        elif bytes_per_second < 1024 * 1024:
+            return f"{bytes_per_second / 1024:.1f} KB/s"
+        else:
+            return f"{bytes_per_second / (1024 * 1024):.1f} MB/s"
+    
     async def batch_process_with_concurrency(self, client: Client, acc, user_message: Message, 
                                             chatid: int, from_id: int, to_id: int, 
-                                            user_settings: dict, max_concurrent: int = 2):  # Reduced concurrency for Heroku
-        """Simplified batch processor that works within Heroku constraints"""
+                                            user_settings: dict, max_concurrent: int = 3):
         total_messages = to_id - from_id + 1
         processed = 0
         successful = 0
         failed = 0
         filtered = 0
         file_types_count = {'video': 0, 'document': 0, 'photo': 0, 'audio': 0, 'text': 0, 'other': 0}
+        self.download_speeds = []
+        self.upload_speeds = []
+        error_messages = []
         
-        destination_info = user_settings.get('destination_channel') or "Bot Chat"
+        # IGNORE user destination settings for now - always use user's chat to avoid PEER_ID_INVALID
+        destination_info = "Your chat (safe mode)"
+        
         file_filter = user_settings.get('file_type_filter', 'all').title()
         
         progress_msg = await user_message.reply(
-            f"🚀 **Starting Batch Process**\n\n"
+            f"🚀 **Starting Optimized Batch Process**\n\n"
             f"📊 Total messages: **{total_messages}**\n"
+            f"⚡ Concurrent tasks: **{max_concurrent}**\n"
             f"📍 Destination: **{destination_info}**\n"
             f"🎞 File filter: **{file_filter}**\n\n"
-            f"Processing 0/{total_messages}..."
+            f"Initializing..."
         )
         
         start_time = time.time()
+        last_update = start_time
         
-        # Process messages sequentially with small delays (more reliable on Heroku)
-        for msgid in range(from_id, to_id + 1):
-            result, info, msg_type = await self.process_single_message(
-                client, acc, user_message, chatid, msgid, user_settings
-            )
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def process_with_semaphore(msgid):
+            nonlocal processed, successful, failed, filtered, last_update
             
-            processed += 1
-            
-            if result == "success":
-                successful += 1
-                if msg_type in ['video', 'animation']:
-                    file_types_count['video'] += 1
-                elif msg_type == 'document':
-                    file_types_count['document'] += 1
-                elif msg_type == 'photo':
-                    file_types_count['photo'] += 1
-                elif msg_type in ['audio', 'voice']:
-                    file_types_count['audio'] += 1
-                elif msg_type == 'text':
-                    file_types_count['text'] += 1
-                else:
-                    file_types_count['other'] += 1
-            elif result == "error":
-                failed += 1
-            elif result == "filtered":
-                filtered += 1
-            
-            # Update progress every message (for small batches) or every few seconds
-            current_time = time.time()
-            elapsed = current_time - start_time
-            speed = processed / elapsed if elapsed > 0 else 0
-            eta = (total_messages - processed) / speed if speed > 0 else 0
-            percentage = (processed / total_messages * 100) if total_messages > 0 else 0
-            
-            progress_bar = self.create_progress_bar(processed, total_messages)
-            
-            status_text = (
-                f"🚀 **Batch Processing** ({percentage:.1f}%)\n\n"
-                f"{progress_bar}\n"
-                f"📊 **{processed}/{total_messages}** files processed\n\n"
-                f"✅ Successful: **{successful}**\n"
-                f"❌ Failed: **{failed}**\n"
-                f"🔍 Filtered: **{filtered}**\n\n"
-                f"⚡ Speed: **{speed:.1f} msg/s** | ⏱ ETA: **{int(eta)}s**\n"
-            )
-            
-            if successful > 0:
-                status_text += (
-                    f"📁 **Files by Type:**\n"
-                    f"🎬 Videos: {file_types_count['video']} | "
-                    f"📄 Docs: {file_types_count['document']}\n"
-                    f"🖼 Photos: {file_types_count['photo']} | "
-                    f"🎵 Audio: {file_types_count['audio']}\n"
-                    f"📝 Text: {file_types_count['text']}\n"
+            async with semaphore:
+                result, info, msg_type, dl_speed, ul_speed = await self.process_message_concurrent(
+                    client, acc, user_message, chatid, msgid, user_settings
                 )
-            
-            await progress_msg.edit_text(status_text)
-            
-            # Small delay between messages to avoid Heroku timeouts
-            if processed < total_messages:
-                await asyncio.sleep(1)
+                
+                if dl_speed > 0:
+                    self.download_speeds.append(dl_speed)
+                if ul_speed > 0:
+                    self.upload_speeds.append(ul_speed)
+                
+                processed += 1
+                
+                if result == "success":
+                    successful += 1
+                    if msg_type in ['video', 'animation']:
+                        file_types_count['video'] += 1
+                    elif msg_type == 'document':
+                        file_types_count['document'] += 1
+                    elif msg_type == 'photo':
+                        file_types_count['photo'] += 1
+                    elif msg_type in ['audio', 'voice']:
+                        file_types_count['audio'] += 1
+                    elif msg_type == 'text':
+                        file_types_count['text'] += 1
+                    else:
+                        file_types_count['other'] += 1
+                elif result == "error":
+                    failed += 1
+                    if len(error_messages) < 5:  # Store first 5 errors
+                        error_messages.append(f"Msg {msgid}: {info}")
+                elif result == "filtered":
+                    filtered += 1
+                else:
+                    failed += 1
+                
+                current_time = time.time()
+                if current_time - last_update >= 2 or processed == total_messages:
+                    elapsed = current_time - start_time
+                    speed = processed / elapsed if elapsed > 0 else 0
+                    eta = (total_messages - processed) / speed if speed > 0 else 0
+                    percentage = (processed / total_messages * 100) if total_messages > 0 else 0
+                    
+                    avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
+                    avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
+                    
+                    progress_bar = self.create_progress_bar(processed, total_messages)
+                    
+                    status_text = (
+                        f"🚀 **Batch Processing** ({percentage:.1f}%)\n\n"
+                        f"{progress_bar}\n"
+                        f"📊 **{processed}/{total_messages}** files processed\n\n"
+                        f"✅ Successful: **{successful}**\n"
+                        f"❌ Failed: **{failed}**\n"
+                        f"🔍 Filtered: **{filtered}**\n\n"
+                    )
+                    
+                    if successful > 0:
+                        status_text += (
+                            f"📁 **Files by Type:**\n"
+                            f"🎬 Videos: {file_types_count['video']} | "
+                            f"📄 Docs: {file_types_count['document']}\n"
+                            f"🖼 Photos: {file_types_count['photo']} | "
+                            f"🎵 Audio: {file_types_count['audio']}\n"
+                            f"📝 Text: {file_types_count['text']}\n\n"
+                        )
+                    
+                    if avg_dl_speed > 0 or avg_ul_speed > 0:
+                        status_text += (
+                            f"⬇️ Download: **{self.format_speed(avg_dl_speed)}**\n"
+                            f"⬆️ Upload: **{self.format_speed(avg_ul_speed)}**\n"
+                        )
+                    
+                    status_text += f"⚡ Speed: **{speed:.1f} msg/s** | ⏱ ETA: **{int(eta)}s**"
+                    
+                    if failed > 0 and len(error_messages) > 0:
+                        status_text += f"\n\n❌ **Last Error:** {error_messages[-1]}"
+                    
+                    await progress_msg.edit_text(status_text)
+                    last_update = current_time
+        
+        tasks = [process_with_semaphore(msgid) for msgid in range(from_id, to_id + 1)]
+        await asyncio.gather(*tasks, return_exceptions=True)
         
         total_time = time.time() - start_time
         avg_speed = total_messages / total_time if total_time > 0 else 0
+        avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
+        avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
         
         final_message = (
             f"✅ **Batch Processing Complete!**\n\n"
@@ -351,8 +475,13 @@ class OptimizedBatchProcessor:
         
         final_message += (
             f"📍 **Destination:** {destination_info}\n"
+            f"⬇️ **Avg Download:** {self.format_speed(avg_dl_speed)}\n"
+            f"⬆️ **Avg Upload:** {self.format_speed(avg_ul_speed)}\n"
             f"⏱ **Time:** {int(total_time)}s | ⚡ **Speed:** {avg_speed:.2f} msg/s\n"
         )
+        
+        if failed > 0 and error_messages:
+            final_message += f"\n**First few errors:**\n" + "\n".join(error_messages[:3])
         
         await progress_msg.edit_text(final_message)
     
