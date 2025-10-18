@@ -171,6 +171,9 @@ async def save(client: Client, message: Message):
         use_optimized = True  # Force use optimized processor
         
         if use_optimized:
+            acc = None
+            acc_created = False
+            
             if LOGIN_SYSTEM == True:
                 user_data = await db.get_session(message.from_user.id)
                 if user_data is None:
@@ -180,6 +183,7 @@ async def save(client: Client, message: Message):
                 try:
                     acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID)
                     await acc.start()
+                    acc_created = True
                 except Exception as e:
                     batch_temp.IS_BATCH[message.from_user.id] = True
                     return await message.reply(f"**Your Login Session Expired. So /logout First Then Login Again By - /login. Error: {e}**")
@@ -190,27 +194,33 @@ async def save(client: Client, message: Message):
                     return
                 acc = TechVJUser
             
+            # Parse chatid before calling batch processor
+            if chatid is None:
+                if "https://t.me/c/" in message.text:
+                    chatid = int("-100" + datas[4])
+                elif "https://t.me/b/" in message.text:
+                    chatid = datas[4]
+                else:
+                    chatid = datas[3]
+            
+            # Use try/finally to ensure session cleanup happens no matter what
             try:
-                if chatid is None:
-                    if "https://t.me/c/" in message.text:
-                        chatid = int("-100" + datas[4])
-                    elif "https://t.me/b/" in message.text:
-                        chatid = datas[4]
-                    else:
-                        chatid = datas[3]
-                
                 # Use optimized batch processor with settings
                 await batch_processor.batch_process_with_concurrency(
-                    client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=2  # Reduced for Heroku
+                    client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=2, topic_id=topic_id
                 )
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                return
-                
             except Exception as e:
                 # If optimized processor fails, show error but don't fall back to old method
                 await message.reply(f"**❌ Optimized batch processor failed. Error: {str(e)}**")
+            finally:
+                # Always clean up the session if we created it
+                if acc_created and acc is not None:
+                    try:
+                        await acc.stop()
+                    except:
+                        pass
                 batch_temp.IS_BATCH[message.from_user.id] = True
-                return
+            return
         
         await message.reply(f"**Starting batch download of {total_messages} message(s)...**")
         
