@@ -201,7 +201,7 @@ async def save(client: Client, message: Message):
                 
                 # Use optimized batch processor with settings
                 await batch_processor.batch_process_with_concurrency(
-                    client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=3
+                    client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=2  # Reduced for Heroku
                 )
                 batch_temp.IS_BATCH[message.from_user.id] = True
                 return
