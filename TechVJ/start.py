@@ -166,7 +166,9 @@ async def save(client: Client, message: Message):
         total_messages = toID - fromID + 1
         
         user_settings = await db.get_user_settings(message.from_user.id)
-        use_optimized = total_messages > 5
+        # NEW CODE (use this):
+        # Always use optimized batch processor for better performance and features
+        use_optimized = True  # Force use optimized processor
         
         if use_optimized:
             if LOGIN_SYSTEM == True:
@@ -178,9 +180,9 @@ async def save(client: Client, message: Message):
                 try:
                     acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID)
                     await acc.start()
-                except Exception:
+                except Exception as e:
                     batch_temp.IS_BATCH[message.from_user.id] = True
-                    return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+                    return await message.reply(f"**Your Login Session Expired. So /logout First Then Login Again By - /login. Error: {e}**")
             else:
                 if TechVJUser is None:
                     batch_temp.IS_BATCH[message.from_user.id] = True
@@ -197,13 +199,16 @@ async def save(client: Client, message: Message):
                     else:
                         chatid = datas[3]
                 
+                # Use optimized batch processor with settings
                 await batch_processor.batch_process_with_concurrency(
                     client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=3
                 )
                 batch_temp.IS_BATCH[message.from_user.id] = True
                 return
+                
             except Exception as e:
-                await message.reply(f"**Optimized mode failed, falling back to standard mode. Error: {e}**")
+                # If optimized processor fails, show error but don't fall back to old method
+                await message.reply(f"**❌ Optimized batch processor failed. Error: {str(e)}**")
                 batch_temp.IS_BATCH[message.from_user.id] = True
                 return
         
