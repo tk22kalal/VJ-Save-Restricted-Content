@@ -18,17 +18,17 @@ class OptimizedBatchProcessor:
         try:
             msg = await acc.get_messages(chatid, msgid)
             if not msg or msg.empty:
-                return None, "Empty message"
+                return None, "Empty message", "unknown"
             
             destination = user_settings.get('destination_channel') or user_message.chat.id
             
             msg_type = self.get_message_type(msg)
             if not msg_type:
-                return None, "Unknown type"
+                return None, "Unknown type", "unknown"
             
             file_filter = user_settings.get('file_type_filter', 'all')
             if file_filter != 'all' and not self.matches_filter(msg_type, file_filter):
-                return None, f"Filtered out ({msg_type})"
+                return None, f"Filtered out ({msg_type})", msg_type.lower()
             
             if msg_type == "Text":
                 cleaned_text = clean_caption(msg.text, user_settings) if msg.text else msg.text
@@ -38,16 +38,16 @@ class OptimizedBatchProcessor:
                         cleaned_text or msg.text,
                         entities=msg.entities
                     )
-                    return "success", "Text sent"
+                    return "success", "Text sent", "text"
                 except Exception as e:
-                    return "error", str(e)
+                    return "error", str(e), "text"
             
             start_time = time.time()
             file = await acc.download_media(msg)
             download_time = time.time() - start_time
             
             if not file:
-                return "error", "Download failed"
+                return "error", "Download failed", msg_type.lower()
             
             file_size = os.path.getsize(file) if os.path.exists(file) else 0
             download_speed = file_size / download_time if download_time > 0 else 0
@@ -57,20 +57,23 @@ class OptimizedBatchProcessor:
                 caption = clean_caption(caption, user_settings)
             
             start_time = time.time()
-            result = await self.upload_media(client, destination, file, msg, msg_type, caption, acc)
+            upload_result, upload_error = await self.upload_media(client, destination, file, msg, msg_type, caption, acc)
             upload_time = time.time() - start_time
             upload_speed = file_size / upload_time if upload_time > 0 else 0
             
             if os.path.exists(file):
                 os.remove(file)
             
-            return result, f"DL: {self.format_speed(download_speed)}, UL: {self.format_speed(upload_speed)}"
+            if upload_result == "error":
+                return "error", upload_error, msg_type.lower()
+            
+            return "success", f"DL: {self.format_speed(download_speed)}, UL: {self.format_speed(upload_speed)}", msg_type.lower()
             
         except FloodWait as e:
             await asyncio.sleep(e.value)
             return await self.process_message_concurrent(client, acc, user_message, chatid, msgid, user_settings)
         except Exception as e:
-            return "error", str(e)
+            return "error", str(e), "unknown"
     
     async def upload_media(self, client: Client, chat_id: int, file: str, msg, msg_type: str, caption: str, acc):
         try:
@@ -138,9 +141,9 @@ class OptimizedBatchProcessor:
             elif msg_type == "Photo":
                 await client.send_photo(chat_id, file, caption=caption)
             
-            return "success"
+            return ("success", "")
         except Exception as e:
-            return f"error: {str(e)}"
+            return ("error", str(e))
     
     def get_message_type(self, msg):
         try:
@@ -224,6 +227,7 @@ class OptimizedBatchProcessor:
         successful = 0
         failed = 0
         filtered = 0
+        file_types_count = {'video': 0, 'document': 0, 'photo': 0, 'audio': 0, 'text': 0, 'other': 0}
         
         progress_msg = await user_message.reply(
             f"🚀 **Starting optimized batch process**\n"
@@ -241,7 +245,7 @@ class OptimizedBatchProcessor:
             nonlocal processed, successful, failed, filtered, last_update
             
             async with semaphore:
-                result, info = await self.process_message_concurrent(
+                result, info, msg_type = await self.process_message_concurrent(
                     client, acc, user_message, chatid, msgid, user_settings
                 )
                 
@@ -249,6 +253,18 @@ class OptimizedBatchProcessor:
                 
                 if result == "success":
                     successful += 1
+                    if msg_type in ['video', 'animation']:
+                        file_types_count['video'] += 1
+                    elif msg_type == 'document':
+                        file_types_count['document'] += 1
+                    elif msg_type == 'photo':
+                        file_types_count['photo'] += 1
+                    elif msg_type in ['audio', 'voice']:
+                        file_types_count['audio'] += 1
+                    elif msg_type == 'text':
+                        file_types_count['text'] += 1
+                    else:
+                        file_types_count['other'] += 1
                 elif result == "error":
                     failed += 1
                 elif result is None:
@@ -258,20 +274,27 @@ class OptimizedBatchProcessor:
                         failed += 1
                 
                 current_time = time.time()
-                if current_time - last_update >= 3:
+                if current_time - last_update >= 2:
                     elapsed = current_time - start_time
                     speed = processed / elapsed if elapsed > 0 else 0
                     eta = (total_messages - processed) / speed if speed > 0 else 0
                     
+                    progress_bar = self.create_progress_bar(processed, total_messages)
+                    
                     await progress_msg.edit_text(
                         f"🚀 **Optimized Batch Processing**\n\n"
-                        f"📊 Progress: {processed}/{total_messages}\n"
+                        f"{progress_bar}\n"
+                        f"📊 Progress: **{processed}/{total_messages}** messages\n\n"
                         f"✅ Successful: {successful}\n"
                         f"❌ Failed: {failed}\n"
                         f"🔍 Filtered: {filtered}\n\n"
-                        f"⚡ Speed: {speed:.1f} msg/s\n"
-                        f"⏱ ETA: {int(eta)}s\n"
-                        f"ℹ️ Last: {info}"
+                        f"📁 **Downloaded:**\n"
+                        f"🎬 Videos: {file_types_count['video']}\n"
+                        f"📄 Documents: {file_types_count['document']}\n"
+                        f"🖼 Photos: {file_types_count['photo']}\n"
+                        f"🎵 Audio: {file_types_count['audio']}\n"
+                        f"📝 Text: {file_types_count['text']}\n\n"
+                        f"⚡ Speed: {speed:.1f} msg/s | ⏱ ETA: {int(eta)}s"
                     )
                     last_update = current_time
         
@@ -283,12 +306,23 @@ class OptimizedBatchProcessor:
         
         await progress_msg.edit_text(
             f"✅ **Batch Processing Complete!**\n\n"
-            f"📊 Total: {total_messages}\n"
+            f"📊 Total: {total_messages} messages\n"
             f"✅ Successful: {successful}\n"
             f"❌ Failed: {failed}\n"
             f"🔍 Filtered: {filtered}\n\n"
-            f"⏱ Time: {int(total_time)}s\n"
-            f"⚡ Avg Speed: {avg_speed:.2f} msg/s"
+            f"📁 **Files Downloaded:**\n"
+            f"🎬 Videos: {file_types_count['video']}\n"
+            f"📄 Documents: {file_types_count['document']}\n"
+            f"🖼 Photos: {file_types_count['photo']}\n"
+            f"🎵 Audio: {file_types_count['audio']}\n"
+            f"📝 Text: {file_types_count['text']}\n\n"
+            f"⏱ Time: {int(total_time)}s | ⚡ Avg Speed: {avg_speed:.2f} msg/s"
         )
+    
+    def create_progress_bar(self, current: int, total: int, length: int = 10) -> str:
+        percent = current / total if total > 0 else 0
+        filled = int(length * percent)
+        bar = '█' * filled + '░' * (length - filled)
+        return f"[{bar}] {int(percent * 100)}%"
 
 batch_processor = OptimizedBatchProcessor()
