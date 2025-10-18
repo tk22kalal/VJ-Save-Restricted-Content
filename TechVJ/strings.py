@@ -4,6 +4,15 @@
 
 HELP_TXT = """**🌟 Help Menu** 
 
+**__COMMANDS__**
+
+/start - Start the bot
+/help - Show this help menu
+/settings - Configure batch processing preferences
+/login - Login with your Telegram account
+/logout - Logout from your account
+/cancel - Cancel ongoing batch operation
+
 **__FOR PRIVATE CHATS__**
 
 __first send invite link of the chat (unnecessary if the account of string session already member of the chat)
@@ -29,7 +38,16 @@ https://t.me/xxxx/1001-1010
 https://t.me/c/xxxx/101 - 120
 ```
 
-__note that space in between doesn't matter__"""
+__note that space in between doesn't matter__
+
+**__FEATURES__**
+
+🚀 Optimized batch processing (auto-enabled for 6+ messages)
+⚙️ Customizable settings via /settings
+✂️ Caption cleanup (remove @usernames, links, hashtags)
+🎞 File type filtering
+🗂 Custom destination channels
+⚡ Real-time progress with speed indicators"""
        
 # Don't Remove Credit Tg - @VJ_Botz
 # Subscribe YouTube Channel For Amazing Bot https://youtube.com/@Tech_VJ
