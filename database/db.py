@@ -13,6 +13,16 @@ class Database:
             id = id,
             name = name,
             session = None,
+            settings = {
+                'destination_channel': None,
+                'file_type_filter': 'all',
+                'caption_cleanup': {
+                    'remove_usernames': False,
+                    'remove_links': False,
+                    'remove_hashtags': False
+                },
+                'custom_remove_words': []
+            }
         )
     
     async def add_user(self, id, name):
@@ -39,5 +49,68 @@ class Database:
     async def get_session(self, id):
         user = await self.col.find_one({'id': int(id)})
         return user.get('session')
+
+    async def get_user_settings(self, id):
+        user = await self.col.find_one({'id': int(id)})
+        if user and 'settings' in user:
+            return user['settings']
+        return {
+            'destination_channel': None,
+            'file_type_filter': 'all',
+            'caption_cleanup': {
+                'remove_usernames': False,
+                'remove_links': False,
+                'remove_hashtags': False
+            },
+            'custom_remove_words': []
+        }
+
+    async def update_user_settings(self, id, settings):
+        await self.col.update_one({'id': int(id)}, {'$set': {'settings': settings}})
+
+    async def set_destination_channel(self, id, channel):
+        settings = await self.get_user_settings(id)
+        settings['destination_channel'] = channel
+        await self.update_user_settings(id, settings)
+
+    async def set_file_type_filter(self, id, filter_type):
+        settings = await self.get_user_settings(id)
+        settings['file_type_filter'] = filter_type
+        await self.update_user_settings(id, settings)
+
+    async def set_caption_cleanup(self, id, cleanup_type, value):
+        settings = await self.get_user_settings(id)
+        settings['caption_cleanup'][cleanup_type] = value
+        await self.update_user_settings(id, settings)
+
+    async def add_custom_remove_word(self, id, word):
+        settings = await self.get_user_settings(id)
+        if word not in settings['custom_remove_words']:
+            settings['custom_remove_words'].append(word)
+        await self.update_user_settings(id, settings)
+
+    async def remove_custom_remove_word(self, id, word):
+        settings = await self.get_user_settings(id)
+        if word in settings['custom_remove_words']:
+            settings['custom_remove_words'].remove(word)
+        await self.update_user_settings(id, settings)
+
+    async def clear_custom_remove_words(self, id):
+        settings = await self.get_user_settings(id)
+        settings['custom_remove_words'] = []
+        await self.update_user_settings(id, settings)
+
+    async def reset_user_settings(self, id):
+        default_settings = {
+            'destination_channel': None,
+            'file_type_filter': 'all',
+            'caption_cleanup': {
+                'remove_usernames': False,
+                'remove_links': False,
+                'remove_hashtags': False
+            },
+            'custom_remove_words': []
+        }
+        await self.update_user_settings(id, default_settings)
 
 db = Database(DB_URI, DB_NAME)
