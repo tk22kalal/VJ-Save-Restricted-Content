@@ -11,24 +11,25 @@ from TechVJ.settings import clean_caption, clean_filename
 class OptimizedBatchProcessor:
     def __init__(self):
         self.active_tasks = {}
-        self.download_speeds = {}
-        self.upload_speeds = {}
+        self.download_speeds = []
+        self.upload_speeds = []
+        self.current_file = 0
     
     async def process_message_concurrent(self, client: Client, acc, user_message: Message, chatid: int, msgid: int, user_settings: dict):
         try:
             msg = await acc.get_messages(chatid, msgid)
             if not msg or msg.empty:
-                return None, "Empty message", "unknown"
+                return None, "Empty message", "unknown", 0, 0
             
             destination = user_settings.get('destination_channel') or user_message.chat.id
             
             msg_type = self.get_message_type(msg)
             if not msg_type:
-                return None, "Unknown type", "unknown"
+                return None, "Unknown type", "unknown", 0, 0
             
             file_filter = user_settings.get('file_type_filter', 'all')
             if file_filter != 'all' and not self.matches_filter(msg_type, file_filter):
-                return None, f"Filtered out ({msg_type})", msg_type.lower()
+                return None, f"Filtered out ({msg_type})", msg_type.lower(), 0, 0
             
             if msg_type == "Text":
                 cleaned_text = clean_caption(msg.text, user_settings) if msg.text else msg.text
@@ -38,16 +39,16 @@ class OptimizedBatchProcessor:
                         cleaned_text or msg.text,
                         entities=msg.entities
                     )
-                    return "success", "Text sent", "text"
+                    return "success", "Text sent", "text", 0, 0
                 except Exception as e:
-                    return "error", str(e), "text"
+                    return "error", str(e), "text", 0, 0
             
             start_time = time.time()
             file = await acc.download_media(msg)
             download_time = time.time() - start_time
             
             if not file:
-                return "error", "Download failed", msg_type.lower()
+                return "error", "Download failed", msg_type.lower(), 0, 0
             
             file_size = os.path.getsize(file) if os.path.exists(file) else 0
             download_speed = file_size / download_time if download_time > 0 else 0
@@ -65,18 +66,23 @@ class OptimizedBatchProcessor:
                 os.remove(file)
             
             if upload_result == "error":
-                return "error", upload_error, msg_type.lower()
+                return "error", upload_error, msg_type.lower(), 0, 0
             
-            return "success", f"DL: {self.format_speed(download_speed)}, UL: {self.format_speed(upload_speed)}", msg_type.lower()
+            return "success", f"DL: {self.format_speed(download_speed)}, UL: {self.format_speed(upload_speed)}", msg_type.lower(), download_speed, upload_speed
             
         except FloodWait as e:
             await asyncio.sleep(e.value)
             return await self.process_message_concurrent(client, acc, user_message, chatid, msgid, user_settings)
         except Exception as e:
-            return "error", str(e), "unknown"
+            return "error", str(e), "unknown", 0, 0
     
-    async def upload_media(self, client: Client, chat_id: int, file: str, msg, msg_type: str, caption: str, acc):
+    async def upload_media(self, client: Client, chat_id, file: str, msg, msg_type: str, caption: str, acc):
         try:
+            try:
+                chat_info = await client.get_chat(chat_id)
+            except Exception as e:
+                return ("error", f"Invalid destination channel: {chat_id}. Error: {str(e)}")
+            
             if msg_type == "Document":
                 ph_path = None
                 try:
@@ -228,11 +234,18 @@ class OptimizedBatchProcessor:
         failed = 0
         filtered = 0
         file_types_count = {'video': 0, 'document': 0, 'photo': 0, 'audio': 0, 'text': 0, 'other': 0}
+        self.download_speeds = []
+        self.upload_speeds = []
+        
+        destination_info = user_settings.get('destination_channel') or "Bot Chat"
+        file_filter = user_settings.get('file_type_filter', 'all').title()
         
         progress_msg = await user_message.reply(
-            f"🚀 **Starting optimized batch process**\n"
-            f"📊 Total messages: {total_messages}\n"
-            f"⚡ Max concurrent: {max_concurrent}\n\n"
+            f"🚀 **Starting Optimized Batch Process**\n\n"
+            f"📊 Total messages: **{total_messages}**\n"
+            f"⚡ Concurrent tasks: **{max_concurrent}**\n"
+            f"📍 Destination: **{destination_info}**\n"
+            f"🎞 File filter: **{file_filter}**\n\n"
             f"Processing..."
         )
         
@@ -245,9 +258,14 @@ class OptimizedBatchProcessor:
             nonlocal processed, successful, failed, filtered, last_update
             
             async with semaphore:
-                result, info, msg_type = await self.process_message_concurrent(
+                result, info, msg_type, dl_speed, ul_speed = await self.process_message_concurrent(
                     client, acc, user_message, chatid, msgid, user_settings
                 )
+                
+                if dl_speed > 0:
+                    self.download_speeds.append(dl_speed)
+                if ul_speed > 0:
+                    self.upload_speeds.append(ul_speed)
                 
                 processed += 1
                 
@@ -278,23 +296,29 @@ class OptimizedBatchProcessor:
                     elapsed = current_time - start_time
                     speed = processed / elapsed if elapsed > 0 else 0
                     eta = (total_messages - processed) / speed if speed > 0 else 0
+                    percentage = (processed / total_messages * 100) if total_messages > 0 else 0
+                    
+                    avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
+                    avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
                     
                     progress_bar = self.create_progress_bar(processed, total_messages)
                     
                     await progress_msg.edit_text(
-                        f"🚀 **Optimized Batch Processing**\n\n"
+                        f"🚀 **Batch Processing** ({percentage:.1f}%)\n\n"
                         f"{progress_bar}\n"
-                        f"📊 Progress: **{processed}/{total_messages}** messages\n\n"
-                        f"✅ Successful: {successful}\n"
-                        f"❌ Failed: {failed}\n"
-                        f"🔍 Filtered: {filtered}\n\n"
-                        f"📁 **Downloaded:**\n"
-                        f"🎬 Videos: {file_types_count['video']}\n"
-                        f"📄 Documents: {file_types_count['document']}\n"
-                        f"🖼 Photos: {file_types_count['photo']}\n"
+                        f"📊 **{processed}/{total_messages}** files processed\n\n"
+                        f"✅ Successful: **{successful}**\n"
+                        f"❌ Failed: **{failed}**\n"
+                        f"🔍 Filtered: **{filtered}**\n\n"
+                        f"📁 **Files by Type:**\n"
+                        f"🎬 Videos: {file_types_count['video']} | "
+                        f"📄 Docs: {file_types_count['document']}\n"
+                        f"🖼 Photos: {file_types_count['photo']} | "
                         f"🎵 Audio: {file_types_count['audio']}\n"
                         f"📝 Text: {file_types_count['text']}\n\n"
-                        f"⚡ Speed: {speed:.1f} msg/s | ⏱ ETA: {int(eta)}s"
+                        f"⬇️ Download: **{self.format_speed(avg_dl_speed)}**\n"
+                        f"⬆️ Upload: **{self.format_speed(avg_ul_speed)}**\n"
+                        f"⚡ Speed: **{speed:.1f} msg/s** | ⏱ ETA: **{int(eta)}s**"
                     )
                     last_update = current_time
         
@@ -303,20 +327,25 @@ class OptimizedBatchProcessor:
         
         total_time = time.time() - start_time
         avg_speed = total_messages / total_time if total_time > 0 else 0
+        avg_dl_speed = sum(self.download_speeds) / len(self.download_speeds) if self.download_speeds else 0
+        avg_ul_speed = sum(self.upload_speeds) / len(self.upload_speeds) if self.upload_speeds else 0
         
         await progress_msg.edit_text(
             f"✅ **Batch Processing Complete!**\n\n"
-            f"📊 Total: {total_messages} messages\n"
-            f"✅ Successful: {successful}\n"
-            f"❌ Failed: {failed}\n"
-            f"🔍 Filtered: {filtered}\n\n"
-            f"📁 **Files Downloaded:**\n"
+            f"📊 **Total:** {total_messages} messages\n"
+            f"✅ Successful: **{successful}**\n"
+            f"❌ Failed: **{failed}**\n"
+            f"🔍 Filtered: **{filtered}**\n\n"
+            f"📁 **Files Processed:**\n"
             f"🎬 Videos: {file_types_count['video']}\n"
             f"📄 Documents: {file_types_count['document']}\n"
             f"🖼 Photos: {file_types_count['photo']}\n"
             f"🎵 Audio: {file_types_count['audio']}\n"
             f"📝 Text: {file_types_count['text']}\n\n"
-            f"⏱ Time: {int(total_time)}s | ⚡ Avg Speed: {avg_speed:.2f} msg/s"
+            f"📍 **Destination:** {destination_info}\n"
+            f"⬇️ **Avg Download:** {self.format_speed(avg_dl_speed)}\n"
+            f"⬆️ **Avg Upload:** {self.format_speed(avg_ul_speed)}\n"
+            f"⏱ **Time:** {int(total_time)}s | ⚡ **Speed:** {avg_speed:.2f} msg/s"
         )
     
     def create_progress_bar(self, current: int, total: int, length: int = 10) -> str:
