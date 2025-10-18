@@ -16,6 +16,8 @@ from pyrogram.errors import (
     PeerIdInvalid,
     ChannelPrivate,
     ChatWriteForbidden,
+    ChatAdminRequired,
+    UserNotParticipant,
 )
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from config import API_ID, API_HASH, ERROR_MESSAGE, LOGIN_SYSTEM, STRING_SESSION
@@ -67,28 +69,122 @@ def progress(current, total, message, type):
         fileup.write(f"{current * 100 / total:.1f}%")
 
 
-# Get user's upload destination
+# Validate and get user's upload destination
 async def get_user_destination(client: Client, user_id: int, user_message: Message):
-    """Get user's upload destination from database"""
+    """Get and validate user's upload destination from database"""
     try:
-        user_dest = await db.get_user_destination(user_id)
-        if user_dest and user_dest.get('destination'):
-            destination_chat = user_dest['destination']
-            
-            # Verify the bot has access to the destination
-            try:
-                await client.get_chat(destination_chat)
-                return destination_chat
-            except (PeerIdInvalid, ChannelPrivate, ChatWriteForbidden):
-                # Fallback to user's chat if destination is invalid
-                await user_message.reply("⚠️ Cannot access your configured destination channel. Using your chat instead.")
-                return user_message.chat.id
-        else:
+        settings = await db.get_user_settings(user_id)
+        destination = settings.get('destination_channel')
+        
+        if not destination:
             # No destination configured, use user's chat
-            return user_message.chat.id
+            return user_message.chat.id, None
+        
+        # Try to parse destination (could be @username or -100123456)
+        try:
+            # Try to get chat info to validate access
+            chat_info = await client.get_chat(destination)
+            
+            # Check if bot is admin (for channels/groups)
+            if chat_info.type in ["channel", "supergroup"]:
+                try:
+                    bot_member = await client.get_chat_member(destination, "me")
+                    
+                    # Check if bot has necessary permissions
+                    if bot_member.status == "administrator":
+                        if not bot_member.privileges.can_post_messages:
+                            error_msg = (
+                                f"⚠️ **Destination Channel Issue**\n\n"
+                                f"Bot is admin in `{destination}` but doesn't have **'Post Messages'** permission.\n\n"
+                                f"**Fix:** Give bot 'Post Messages' permission or use /settings to change destination."
+                            )
+                            return user_message.chat.id, error_msg
+                        return destination, None
+                    elif bot_member.status == "creator":
+                        return destination, None
+                    else:
+                        error_msg = (
+                            f"❌ **Destination Channel Error**\n\n"
+                            f"Bot is not admin in `{destination}`\n\n"
+                            f"**Fix:**\n"
+                            f"1. Add bot as admin to the channel\n"
+                            f"2. Give 'Post Messages' permission\n"
+                            f"3. Or use /settings to change destination"
+                        )
+                        return user_message.chat.id, error_msg
+                        
+                except UserNotParticipant:
+                    error_msg = (
+                        f"❌ **Destination Channel Error**\n\n"
+                        f"Bot is not a member of `{destination}`\n\n"
+                        f"**Fix:**\n"
+                        f"1. Add bot to the channel as admin\n"
+                        f"2. Give 'Post Messages' permission\n"
+                        f"3. Or use /settings to change destination"
+                    )
+                    return user_message.chat.id, error_msg
+                except ChatAdminRequired:
+                    error_msg = (
+                        f"❌ **Destination Channel Error**\n\n"
+                        f"Bot needs admin rights in `{destination}`\n\n"
+                        f"**Fix:**\n"
+                        f"1. Make bot admin in the channel\n"
+                        f"2. Enable 'Post Messages' permission\n"
+                        f"3. Or use /settings to change destination"
+                    )
+                    return user_message.chat.id, error_msg
+                    
+            # For private chats, just return the destination
+            return destination, None
+            
+        except PeerIdInvalid:
+            error_msg = (
+                f"❌ **Invalid Destination**\n\n"
+                f"Channel ID `{destination}` is invalid.\n\n"
+                f"**Fix:** Use /settings to set a valid channel username (@channel) or ID (-100123456)"
+            )
+            return user_message.chat.id, error_msg
+            
+        except ChannelPrivate:
+            error_msg = (
+                f"❌ **Private Channel**\n\n"
+                f"Cannot access `{destination}` - it's private.\n\n"
+                f"**Fix:**\n"
+                f"1. Add bot to the channel as admin\n"
+                f"2. Or use /settings to change destination"
+            )
+            return user_message.chat.id, error_msg
+            
+        except ChatWriteForbidden:
+            error_msg = (
+                f"❌ **Write Permission Denied**\n\n"
+                f"Bot cannot send messages to `{destination}`\n\n"
+                f"**Fix:**\n"
+                f"1. Make bot admin with 'Post Messages' permission\n"
+                f"2. Or use /settings to change destination"
+            )
+            return user_message.chat.id, error_msg
+            
+        except UsernameNotOccupied:
+            error_msg = (
+                f"❌ **Channel Not Found**\n\n"
+                f"Username `{destination}` doesn't exist.\n\n"
+                f"**Fix:** Use /settings to set a valid channel username"
+            )
+            return user_message.chat.id, error_msg
+            
+        except Exception as e:
+            error_msg = (
+                f"❌ **Destination Error**\n\n"
+                f"Cannot access `{destination}`\n"
+                f"Error: {str(e)}\n\n"
+                f"**Fix:** Use /settings to change destination"
+            )
+            return user_message.chat.id, error_msg
+            
     except Exception:
         # Fallback to user's chat in case of any error
-        return user_message.chat.id
+        return user_message.chat.id, None
 
 
 # Get user settings
@@ -100,19 +196,25 @@ async def get_user_settings(user_id: int):
             # Default settings
             settings = {
                 'file_type_filter': 'all',
-                'caption_position': 'bottom',
-                'remove_words': [],
-                'custom_caption': None,
-                'replace_words': {}
+                'caption_cleanup': {
+                    'remove_usernames': False,
+                    'remove_links': False,
+                    'remove_hashtags': False
+                },
+                'custom_remove_words': [],
+                'destination_channel': None
             }
         return settings
     except Exception:
         return {
             'file_type_filter': 'all',
-            'caption_position': 'bottom',
-            'remove_words': [],
-            'custom_caption': None,
-            'replace_words': {}
+            'caption_cleanup': {
+                'remove_usernames': False,
+                'remove_links': False,
+                'remove_hashtags': False
+            },
+            'custom_remove_words': [],
+            'destination_channel': None
         }
 
 
@@ -233,8 +335,14 @@ async def save(client: Client, message: Message):
         # Get user settings
         user_settings = await get_user_settings(message.from_user.id)
         
-        # Get destination
-        destination_chat = await get_user_destination(client, message.from_user.id, message)
+        # Get and validate destination
+        destination_chat, dest_error = await get_user_destination(client, message.from_user.id, message)
+        
+        # If there's a destination error, show it and stop
+        if dest_error:
+            batch_temp.IS_BATCH[message.from_user.id] = True
+            await message.reply(dest_error)
+            return
         
         # Get destination info for display
         try:
@@ -242,7 +350,12 @@ async def save(client: Client, message: Message):
                 destination_info = "Your chat"
             else:
                 dest_chat = await client.get_chat(destination_chat)
-                destination_info = f"@{dest_chat.username}" if dest_chat.username else f"{dest_chat.title}"
+                if dest_chat.username:
+                    destination_info = f"@{dest_chat.username}"
+                elif dest_chat.title:
+                    destination_info = f"{dest_chat.title}"
+                else:
+                    destination_info = f"Chat ID: {destination_chat}"
         except:
             destination_info = "Your chat"
         
@@ -349,12 +462,15 @@ async def save(client: Client, message: Message):
             # Update progress every 3 messages or at end
             if processed % 3 == 0 or processed == total_messages:
                 percentage = (processed / total_messages * 100) if total_messages > 0 else 0
-                await progress_msg.edit_text(
-                    f"🚀 **Batch Processing** ({percentage:.1f}%)\n\n"
-                    f"📊 **{processed}/{total_messages}** processed\n"
-                    f"✅ Success: **{successful}** | ❌ Failed: **{failed}** | 🔍 Filtered: **{filtered}**\n\n"
-                    f"📍 Destination: **{destination_info}**"
-                )
+                try:
+                    await progress_msg.edit_text(
+                        f"🚀 **Batch Processing** ({percentage:.1f}%)\n\n"
+                        f"📊 **{processed}/{total_messages}** processed\n"
+                        f"✅ Success: **{successful}** | ❌ Failed: **{failed}** | 🔍 Filtered: **{filtered}**\n\n"
+                        f"📍 Destination: **{destination_info}**"
+                    )
+                except:
+                    pass
 
             # wait time between iterations
             await asyncio.sleep(3)
@@ -362,11 +478,14 @@ async def save(client: Client, message: Message):
         batch_temp.IS_BATCH[message.from_user.id] = True
         
         # Final summary
-        await progress_msg.edit_text(
-            f"✅ **Batch Complete!**\n\n"
-            f"📊 Total: {total_messages} | ✅ Success: **{successful}** | ❌ Failed: **{failed}** | 🔍 Filtered: **{filtered}**\n\n"
-            f"📍 Destination: **{destination_info}**"
-        )
+        try:
+            await progress_msg.edit_text(
+                f"✅ **Batch Complete!**\n\n"
+                f"📊 Total: {total_messages} | ✅ Success: **{successful}** | ❌ Failed: **{failed}** | 🔍 Filtered: **{filtered}**\n\n"
+                f"📍 Destination: **{destination_info}**"
+            )
+        except:
+            pass
 
 
 # handle public messages with settings
@@ -479,7 +598,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             return "error"
 
     smsg = await client.send_message(message.chat.id, "**Downloading**", reply_to_message_id=message.id)
-    asyncio.create_task(downstatus(client, f"{message.id}downstatus.txt", smsg, chat))
+    asyncio.create_task(downstatus(client, f"{message.id}downstatus.txt", smsg, message.chat.id))
     try:
         file = await acc.download_media(msg, progress=progress, progress_args=[message, "down"])
         if os.path.exists(f"{message.id}downstatus.txt"):
@@ -487,13 +606,16 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     except Exception as e:
         if ERROR_MESSAGE:
             await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-        await smsg.delete()
+        try:
+            await smsg.delete()
+        except:
+            pass
         return "error"
 
     if batch_temp.IS_BATCH.get(message.from_user.id):
         return "error"
 
-    asyncio.create_task(upstatus(client, f"{message.id}upstatus.txt", smsg, chat))
+    asyncio.create_task(upstatus(client, f"{message.id}upstatus.txt", smsg, message.chat.id))
 
     # Clean caption using settings
     caption = msg.caption if msg.caption else None
@@ -526,6 +648,116 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 progress_args=[message, "up"],
             )
             upload_result = "success"
+        except Exception as e:
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+
+    # Audio
+    elif msg_type == "Audio":
+        ph_path = None
+        try:
+            if getattr(msg.audio, "thumbs", None):
+                ph_path = await acc.download_media(msg.audio.thumbs[0].file_id)
+        except Exception:
+            ph_path = None
+
+        try:
+            await client.send_audio(
+                chat,
+                file,
+                thumb=ph_path,
+                caption=caption,
+                reply_to_message_id=reply_to_id,
+                parse_mode=enums.ParseMode.HTML,
+                progress=progress,
+                progress_args=[message, "up"],
+            )
+            upload_result = "success"
+        except Exception as e:
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+        if ph_path:
+            try:
+                os.remove(ph_path)
+            except:
+                pass
+
+    # Photo
+    elif msg_type == "Photo":
+        try:
+            await client.send_photo(chat, file, caption=caption, reply_to_message_id=reply_to_id, parse_mode=enums.ParseMode.HTML)
+            upload_result = "success"
+        except Exception as e:
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+
+    # cleanup
+    try:
+        if os.path.exists(f"{message.id}upstatus.txt"):
+            os.remove(f"{message.id}upstatus.txt")
+        if os.path.exists(file):
+            os.remove(file)
+    except Exception:
+        pass
+
+    try:
+        await client.delete_messages(message.chat.id, [smsg.id])
+    except:
+        pass
+    
+    return upload_result
+
+
+# get the type of message
+def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
+    try:
+        if getattr(msg, "document", None) and getattr(msg.document, "file_id", None):
+            return "Document"
+    except:
+        pass
+
+    try:
+        if getattr(msg, "video", None) and getattr(msg.video, "file_id", None):
+            return "Video"
+    except:
+        pass
+
+    try:
+        if getattr(msg, "animation", None) and getattr(msg.animation, "file_id", None):
+            return "Animation"
+    except:
+        pass
+
+    try:
+        if getattr(msg, "sticker", None) and getattr(msg.sticker, "file_id", None):
+            return "Sticker"
+    except:
+        pass
+
+    try:
+        if getattr(msg, "voice", None) and getattr(msg.voice, "file_id", None):
+            return "Voice"
+    except:
+        pass
+
+    try:
+        if getattr(msg, "audio", None) and getattr(msg.audio, "file_id", None):
+            return "Audio"
+    except:
+        pass
+
+    try:
+        if getattr(msg, "photo", None):
+            return "Photo"
+    except:
+        pass
+
+    try:
+        if getattr(msg, "text", None):
+            return "Text"
+    except:
+        pass
+    return Noneresult = "success"
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
