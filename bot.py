@@ -1,3 +1,6 @@
+import nest_asyncio
+nest_asyncio.apply()
+
 from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN, STRING_SESSION, LOGIN_SYSTEM
 
