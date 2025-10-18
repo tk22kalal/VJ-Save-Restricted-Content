@@ -207,7 +207,7 @@ async def save(client: Client, message: Message):
             try:
                 # Use optimized batch processor with settings
                 await batch_processor.batch_process_with_concurrency(
-                    client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=2, topic_id=topic_id
+                    client, acc, message, chatid, fromID, toID, user_settings, max_concurrent=1, topic_id=topic_id
                 )
             except Exception as e:
                 # If optimized processor fails, show error but don't fall back to old method
