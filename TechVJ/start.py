@@ -132,7 +132,23 @@ async def save(client: Client, message: Message):
             )
 
         datas = message.text.split("/")
-        temp = datas[-1].replace("?single", "").split("-")
+        
+        is_supergroup = False
+        topic_id = None
+        chatid = None
+        
+        if "https://t.me/c/" in message.text and len(datas) >= 7:
+            is_supergroup = True
+            try:
+                chatid = int("-100" + datas[4])
+                topic_id = int(datas[5])
+                temp = datas[6].replace("?single", "").split("-")
+            except:
+                temp = datas[-1].replace("?single", "").split("-")
+                is_supergroup = False
+        else:
+            temp = datas[-1].replace("?single", "").split("-")
+        
         try:
             fromID = int(temp[0].strip())
         except:
@@ -143,6 +159,10 @@ async def save(client: Client, message: Message):
             toID = fromID
 
         batch_temp.IS_BATCH[message.from_user.id] = False
+        
+        total_messages = toID - fromID + 1
+        await message.reply(f"**Starting batch download of {total_messages} message(s)...**")
+        
         for msgid in range(fromID, toID + 1):
             if batch_temp.IS_BATCH.get(message.from_user.id):
                 break
@@ -169,18 +189,24 @@ async def save(client: Client, message: Message):
 
             # private (/c/)
             if "https://t.me/c/" in message.text:
-                # datas example: ['https:', '', 't.me', 'c', '<chatid>', '<msgid>']
-                # the chat id is at index 4 in some formats; safer to use datas[4] if exists
-                try:
-                    chatid = int("-100" + datas[4])
-                except Exception:
-                    await client.send_message(message.chat.id, "**Unable to parse private chat link**", reply_to_message_id=message.id)
-                    return
-                try:
-                    await handle_private(client, acc, message, chatid, msgid)
-                except Exception as e:
-                    if ERROR_MESSAGE:
-                        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+                if is_supergroup and topic_id is not None and chatid is not None:
+                    try:
+                        await handle_private_supergroup(client, acc, message, chatid, topic_id, msgid)
+                    except Exception as e:
+                        if ERROR_MESSAGE:
+                            await client.send_message(message.chat.id, f"Error processing supergroup message {msgid}: {e}", reply_to_message_id=message.id)
+                else:
+                    try:
+                        if chatid is None:
+                            chatid = int("-100" + datas[4])
+                    except Exception:
+                        await client.send_message(message.chat.id, "**Unable to parse private chat link**", reply_to_message_id=message.id)
+                        return
+                    try:
+                        await handle_private(client, acc, message, chatid, msgid)
+                    except Exception as e:
+                        if ERROR_MESSAGE:
+                            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
 
             # bot (/b/)
             elif "https://t.me/b/" in message.text:
@@ -212,6 +238,36 @@ async def save(client: Client, message: Message):
             await asyncio.sleep(3)
 
         batch_temp.IS_BATCH[message.from_user.id] = True
+        await message.reply("**✅ Batch download completed!**")
+
+
+# handle private supergroup with topic/sub-group filtering
+async def handle_private_supergroup(client: Client, acc, message: Message, chatid: int, topic_id: int, msgid: int):
+    try:
+        msg: Message = await acc.get_messages(chatid, msgid)
+        
+        if not msg or msg.empty:
+            return
+        
+        if hasattr(msg, 'reply_to_message_id') and msg.reply_to_message_id:
+            reply_msg = await acc.get_messages(chatid, msg.reply_to_message_id)
+            if hasattr(reply_msg, 'message_thread_id'):
+                msg_topic_id = reply_msg.message_thread_id
+            else:
+                msg_topic_id = None
+        elif hasattr(msg, 'message_thread_id'):
+            msg_topic_id = msg.message_thread_id
+        else:
+            msg_topic_id = None
+        
+        if msg_topic_id != topic_id:
+            return
+        
+        await handle_private(client, acc, message, chatid, msgid)
+        
+    except Exception as e:
+        if ERROR_MESSAGE:
+            await client.send_message(message.chat.id, f"Error in supergroup handler: {e}", reply_to_message_id=message.id)
 
 
 # handle private
