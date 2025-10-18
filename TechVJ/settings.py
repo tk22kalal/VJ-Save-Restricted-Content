@@ -1,6 +1,7 @@
 import re
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import PeerIdInvalid, ChannelPrivate, UsernameNotOccupied, ChatAdminRequired, UserNotParticipant
 from database.db import db
 
 user_states = {}
@@ -24,12 +25,13 @@ async def show_main_settings_message(client: Client, message: Message, user_id: 
     ])
     
     cleanup_status = "Enabled" if any(settings['caption_cleanup'].values()) else "Disabled"
+    dest_display = settings.get('destination_channel') or 'Not Set'
     
     text = (
         "**⚙️ Settings Menu**\n\n"
         "Configure your batch download and upload preferences:\n\n"
         f"**Current Settings:**\n"
-        f"📍 Destination: {settings['destination_channel'] or 'Not Set'}\n"
+        f"📍 Destination: `{dest_display}`\n"
         f"🎞 File Type: {settings['file_type_filter'].title()}\n"
         f"✂️ Caption Cleanup: {cleanup_status}\n"
         f"🧾 Custom Words: {len(settings['custom_remove_words'])} word(s)"
@@ -51,6 +53,33 @@ async def settings_callback(client: Client, callback: CallbackQuery):
     
     elif data == "settings_destination":
         await callback.answer()
+        dest = settings.get('destination_channel') or 'Not Set'
+        
+        # Validate current destination if set
+        validation_status = ""
+        if settings.get('destination_channel'):
+            try:
+                chat_info = await client.get_chat(settings['destination_channel'])
+                
+                if chat_info.type in ["channel", "supergroup"]:
+                    try:
+                        bot_member = await client.get_chat_member(settings['destination_channel'], "me")
+                        if bot_member.status == "administrator":
+                            if bot_member.privileges.can_post_messages:
+                                validation_status = "\n\n✅ **Status:** Valid & Working"
+                            else:
+                                validation_status = "\n\n⚠️ **Status:** Bot needs 'Post Messages' permission"
+                        elif bot_member.status == "creator":
+                            validation_status = "\n\n✅ **Status:** Valid & Working"
+                        else:
+                            validation_status = "\n\n❌ **Status:** Bot is not admin"
+                    except:
+                        validation_status = "\n\n❌ **Status:** Cannot access channel"
+                else:
+                    validation_status = "\n\n✅ **Status:** Valid"
+            except:
+                validation_status = "\n\n❌ **Status:** Invalid or inaccessible"
+        
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💬 Set Channel/Group", callback_data="dest_set")],
             [InlineKeyboardButton("🗑 Clear Destination", callback_data="dest_clear")],
@@ -58,8 +87,11 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         ])
         await callback.message.edit_text(
             "**🗂 Destination Channel Setup**\n\n"
-            f"Current: {settings['destination_channel'] or 'Not Set'}\n\n"
+            f"Current: `{dest}`{validation_status}\n\n"
             "Set a destination channel/group where extracted files will be uploaded.\n\n"
+            "**Requirements:**\n"
+            "• Bot must be added as admin\n"
+            "• Must have 'Post Messages' permission\n\n"
             "Click 'Set Channel/Group' to enter a channel.",
             reply_markup=keyboard
         )
@@ -220,9 +252,12 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         await callback.message.edit_text(
             "**🗂 Set Destination Channel**\n\n"
             "Send the channel username (with @) or channel ID now.\n\n"
-            "Examples:\n"
+            "**Examples:**\n"
             "• @mychannel\n"
             "• -1001234567890\n\n"
+            "**Requirements:**\n"
+            "• Bot must be admin in the channel\n"
+            "• Bot needs 'Post Messages' permission\n\n"
             "Or send /cancel to go back."
         )
     
@@ -238,8 +273,11 @@ async def settings_callback(client: Client, callback: CallbackQuery):
         settings = await db.get_user_settings(user_id)
         await callback.message.edit_text(
             "**🗂 Destination Channel Setup**\n\n"
-            f"Current: {settings['destination_channel'] or 'Not Set'}\n\n"
+            f"Current: Not Set\n\n"
             "Set a destination channel/group where extracted files will be uploaded.\n\n"
+            "**Requirements:**\n"
+            "• Bot must be added as admin\n"
+            "• Must have 'Post Messages' permission\n\n"
             "Click 'Set Channel/Group' to enter a channel.",
             reply_markup=keyboard
         )
@@ -291,14 +329,119 @@ async def handle_settings_input(client: Client, message: Message):
     
     if state == 'awaiting_destination':
         channel = message.text.strip()
-        await db.set_destination_channel(user_id, channel)
-        user_states.pop(user_id, None)
-        await message.reply(
-            f"✅ Destination channel set to: {channel}\n\n"
-            "All batch uploads will now go to this channel.\n"
-            "Use /settings to change it again."
-        )
-        message.stop_propagation()
+        
+        # Validate the destination
+        try:
+            chat_info = await client.get_chat(channel)
+            
+            # Check if it's a channel or supergroup
+            if chat_info.type in ["channel", "supergroup"]:
+                try:
+                    # Check if bot is member and has permissions
+                    bot_member = await client.get_chat_member(channel, "me")
+                    
+                    if bot_member.status == "administrator":
+                        if not bot_member.privileges.can_post_messages:
+                            user_states.pop(user_id, None)
+                            await message.reply(
+                                f"❌ **Permission Error**\n\n"
+                                f"Bot is admin in `{channel}` but doesn't have **'Post Messages'** permission.\n\n"
+                                f"**Fix:** Give bot 'Post Messages' permission and try again."
+                            )
+                            message.stop_propagation()
+                            return
+                    elif bot_member.status != "creator":
+                        user_states.pop(user_id, None)
+                        await message.reply(
+                            f"❌ **Admin Required**\n\n"
+                            f"Bot must be admin in `{channel}`\n\n"
+                            f"**Steps:**\n"
+                            f"1. Add bot to the channel\n"
+                            f"2. Promote bot to admin\n"
+                            f"3. Enable 'Post Messages' permission\n"
+                            f"4. Try setting destination again"
+                        )
+                        message.stop_propagation()
+                        return
+                        
+                except UserNotParticipant:
+                    user_states.pop(user_id, None)
+                    await message.reply(
+                        f"❌ **Bot Not Added**\n\n"
+                        f"Bot is not a member of `{channel}`\n\n"
+                        f"**Steps:**\n"
+                        f"1. Add bot to the channel\n"
+                        f"2. Promote bot to admin\n"
+                        f"3. Enable 'Post Messages' permission\n"
+                        f"4. Try again"
+                    )
+                    message.stop_propagation()
+                    return
+                except ChatAdminRequired:
+                    user_states.pop(user_id, None)
+                    await message.reply(
+                        f"❌ **Admin Rights Required**\n\n"
+                        f"Bot needs admin rights in `{channel}`\n\n"
+                        f"Make bot admin with 'Post Messages' permission."
+                    )
+                    message.stop_propagation()
+                    return
+            
+            # If all checks pass, save the destination
+            await db.set_destination_channel(user_id, channel)
+            user_states.pop(user_id, None)
+            
+            # Get display name
+            if chat_info.username:
+                display_name = f"@{chat_info.username}"
+            elif chat_info.title:
+                display_name = chat_info.title
+            else:
+                display_name = channel
+            
+            await message.reply(
+                f"✅ **Destination Set Successfully!**\n\n"
+                f"Channel: {display_name}\n"
+                f"ID: `{channel}`\n\n"
+                f"All batch uploads will now go to this channel.\n"
+                f"Use /settings to change it again."
+            )
+            message.stop_propagation()
+            
+        except PeerIdInvalid:
+            user_states.pop(user_id, None)
+            await message.reply(
+                f"❌ **Invalid Channel ID**\n\n"
+                f"`{channel}` is not a valid channel ID or username.\n\n"
+                f"**Valid formats:**\n"
+                f"• @channelname\n"
+                f"• -1001234567890"
+            )
+            message.stop_propagation()
+        except ChannelPrivate:
+            user_states.pop(user_id, None)
+            await message.reply(
+                f"❌ **Private Channel**\n\n"
+                f"Cannot access `{channel}` - it's private.\n\n"
+                f"Add bot to the channel first."
+            )
+            message.stop_propagation()
+        except UsernameNotOccupied:
+            user_states.pop(user_id, None)
+            await message.reply(
+                f"❌ **Username Not Found**\n\n"
+                f"`{channel}` doesn't exist.\n\n"
+                f"Check the username and try again."
+            )
+            message.stop_propagation()
+        except Exception as e:
+            user_states.pop(user_id, None)
+            await message.reply(
+                f"❌ **Error**\n\n"
+                f"Failed to set destination: {str(e)}\n\n"
+                f"Please try again or use /settings."
+            )
+            message.stop_propagation()
     
     elif state == 'awaiting_custom_word':
         word = message.text.strip()
