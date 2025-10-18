@@ -368,27 +368,6 @@ class OptimizedBatchProcessor:
         file_filter = user_settings.get('file_type_filter', 'all').title()
         topic_info = f" | 🎯 Topic: {topic_id}" if topic_id is not None else ""
         
-        # Test first message to verify permissions and avoid slow starts
-        test_msg = await user_message.reply("🔍 Testing permissions...")
-        try:
-            first_msg = await acc.get_messages(chatid, from_id)
-            if not first_msg or first_msg.empty:
-                await test_msg.edit_text("❌ Cannot access messages. Check if:\n• The account has joined the chat\n• Messages are not deleted")
-                return
-            await test_msg.delete()
-        except ChannelPrivate:
-            await test_msg.edit_text("❌ Chat is private and account hasn't joined. Send invite link first using the old batch method.")
-            return
-        except UserNotParticipant:
-            await test_msg.edit_text("❌ Account is not a participant of this chat. Join the chat first.")
-            return
-        except PeerIdInvalid:
-            await test_msg.edit_text("❌ Invalid chat ID. Please check the link.")
-            return
-        except Exception as e:
-            await test_msg.edit_text(f"❌ Permission test failed: {str(e)}")
-            return
-        
         progress_msg = await user_message.reply(
             f"🚀 **Starting Optimized Batch Process**\n\n"
             f"📊 Total messages: **{total_messages}**\n"
