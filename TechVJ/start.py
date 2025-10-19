@@ -177,9 +177,14 @@ async def save(client: Client, message: Message):
                 try:
                     acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID)
                     await acc.start()
-                except Exception:
+                except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
                     batch_temp.IS_BATCH[message.from_user.id] = True
                     return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+                except Exception as e:
+                    if ERROR_MESSAGE:
+                        await message.reply(f"**Error connecting to Telegram:** `{str(e)}`\n**Please try again. If the issue persists, try /logout and /login again.**")
+                    batch_temp.IS_BATCH[message.from_user.id] = True
+                    return
             else:
                 if TechVJUser is None:
                     batch_temp.IS_BATCH[message.from_user.id] = True
