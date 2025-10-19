@@ -5,6 +5,7 @@
 import os
 import asyncio
 import pyrogram
+import time
 from pyrogram import Client, filters, enums
 from pyrogram.errors import (
     FloodWait,
@@ -25,6 +26,51 @@ from bot import TechVJUser
 
 class batch_temp(object):
     IS_BATCH = {}
+
+
+async def retry_on_error(func, *args, max_retries=5, initial_delay=3, **kwargs):
+    """
+    Retry a function with exponential backoff for connection errors.
+    Handles OSError, TimeoutError, and other network-related exceptions.
+    """
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except FloodWait as e:
+            print(f"FloodWait {e.value}s on attempt {attempt + 1}, waiting...")
+            await asyncio.sleep(e.value)
+        except (OSError, TimeoutError, ConnectionError) as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = initial_delay * (2 ** attempt)
+            print(f"Connection error on attempt {attempt + 1}/{max_retries}: {e}. Retrying in {delay}s...")
+            await asyncio.sleep(delay)
+        except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+            raise
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['timeout', 'connection', 'network', 'disconnect', 'lost']):
+                if attempt == max_retries - 1:
+                    raise
+                delay = initial_delay * (2 ** attempt)
+                print(f"Network-related error on attempt {attempt + 1}/{max_retries}: {e}. Retrying in {delay}s...")
+                await asyncio.sleep(delay)
+            else:
+                raise
+    raise Exception(f"Failed after {max_retries} attempts")
+
+
+async def ensure_client_connected(client):
+    """Ensure the client is connected and reconnect if necessary."""
+    try:
+        if not client.is_connected:
+            print("Client disconnected, attempting to reconnect...")
+            await client.start()
+            print("Client reconnected successfully")
+        return True
+    except Exception as e:
+        print(f"Failed to reconnect client: {e}")
+        return False
 
 
 def format_send_error(e: Exception, destination_chat) -> str:
@@ -213,16 +259,19 @@ async def save(client: Client, message: Message):
             if "https://t.me/c/" in message.text:
                 if is_supergroup and topic_id is not None and chatid is not None:
                     try:
-                        await handle_private_supergroup(client, acc, message, chatid, topic_id, msgid)
-                    except FloodWait as e:
-                        await asyncio.sleep(e.value)
-                        try:
-                            await handle_private_supergroup(client, acc, message, chatid, topic_id, msgid)
-                        except Exception:
-                            pass
+                        await retry_on_error(handle_private_supergroup, client, acc, message, chatid, topic_id, msgid)
+                    except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+                        batch_temp.IS_BATCH[message.from_user.id] = True
+                        return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
                     except Exception as e:
-                        if ERROR_MESSAGE:
-                            await client.send_message(message.chat.id, f"Error processing supergroup message {msgid}: {e}", reply_to_message_id=message.id)
+                        error_str = str(e).lower()
+                        if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                            if ERROR_MESSAGE:
+                                await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
+                        else:
+                            print(f"Failed to process message {msgid} after retries: {e}")
+                            if ERROR_MESSAGE:
+                                await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
                 else:
                     try:
                         if chatid is None:
@@ -231,66 +280,67 @@ async def save(client: Client, message: Message):
                         await client.send_message(message.chat.id, "**Unable to parse private chat link**", reply_to_message_id=message.id)
                         return
                     try:
-                        await handle_private(client, acc, message, chatid, msgid)
-                    except FloodWait as e:
-                        await asyncio.sleep(e.value)
-                        try:
-                            await handle_private(client, acc, message, chatid, msgid)
-                        except Exception:
-                            pass
+                        await retry_on_error(handle_private, client, acc, message, chatid, msgid)
+                    except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+                        batch_temp.IS_BATCH[message.from_user.id] = True
+                        return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
                     except Exception as e:
-                        if ERROR_MESSAGE:
-                            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+                        error_str = str(e).lower()
+                        if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                            if ERROR_MESSAGE:
+                                await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
+                        else:
+                            print(f"Failed to process message {msgid} after retries: {e}")
+                            if ERROR_MESSAGE:
+                                await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
 
             # bot (/b/)
             elif "https://t.me/b/" in message.text:
                 try:
                     username = datas[4]
-                    await handle_private(client, acc, message, username, msgid)
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
-                    try:
-                        await handle_private(client, acc, message, username, msgid)
-                    except Exception:
-                        pass
+                    await retry_on_error(handle_private, client, acc, message, username, msgid)
+                except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+                    batch_temp.IS_BATCH[message.from_user.id] = True
+                    return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
                 except Exception as e:
-                    if ERROR_MESSAGE:
-                        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+                    error_str = str(e).lower()
+                    if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                        if ERROR_MESSAGE:
+                            await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
+                    else:
+                        print(f"Failed to process message {msgid} after retries: {e}")
+                        if ERROR_MESSAGE:
+                            await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
 
             # public
             else:
                 username = datas[3]
                 try:
-                    msg = await client.get_messages(username, msgid)
+                    msg = await retry_on_error(client.get_messages, username, msgid)
                 except UsernameNotOccupied:
                     await client.send_message(message.chat.id, "The username is not occupied by anyone", reply_to_message_id=message.id)
                     return
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
-                    try:
-                        msg = await client.get_messages(username, msgid)
-                    except Exception:
-                        pass
+                except Exception as e:
+                    if ERROR_MESSAGE:
+                        await client.send_message(message.chat.id, f"Error getting message {msgid}: {e}", reply_to_message_id=message.id)
+                    continue
                 try:
-                    await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                except FloodWait as e:
-                    await asyncio.sleep(e.value)
-                    try:
-                        await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                    except Exception:
-                        pass
+                    await retry_on_error(client.copy_message, message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
                 except Exception:
                     try:
-                        await handle_private(client, acc, message, username, msgid)
-                    except FloodWait as e:
-                        await asyncio.sleep(e.value)
-                        try:
-                            await handle_private(client, acc, message, username, msgid)
-                        except Exception:
-                            pass
+                        await retry_on_error(handle_private, client, acc, message, username, msgid)
+                    except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+                        batch_temp.IS_BATCH[message.from_user.id] = True
+                        return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
                     except Exception as e:
-                        if ERROR_MESSAGE:
-                            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+                        error_str = str(e).lower()
+                        if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                            if ERROR_MESSAGE:
+                                await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
+                        else:
+                            print(f"Failed to process message {msgid} after retries: {e}")
+                            if ERROR_MESSAGE:
+                                await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
 
         batch_temp.IS_BATCH[message.from_user.id] = True
         await message.reply("**✅ Batch download completed!**")
@@ -299,13 +349,15 @@ async def save(client: Client, message: Message):
 # handle private supergroup with topic/sub-group filtering
 async def handle_private_supergroup(client: Client, acc, message: Message, chatid: int, topic_id: int, msgid: int):
     try:
-        msg: Message = await acc.get_messages(chatid, msgid)
+        await ensure_client_connected(acc)
+        
+        msg: Message = await retry_on_error(acc.get_messages, chatid, msgid)
         
         if not msg or msg.empty:
             return
         
         if hasattr(msg, 'reply_to_message_id') and msg.reply_to_message_id:
-            reply_msg = await acc.get_messages(chatid, msg.reply_to_message_id)
+            reply_msg = await retry_on_error(acc.get_messages, chatid, msg.reply_to_message_id)
             if hasattr(reply_msg, 'message_thread_id'):
                 msg_topic_id = reply_msg.message_thread_id
             else:
@@ -320,14 +372,22 @@ async def handle_private_supergroup(client: Client, acc, message: Message, chati
         
         await handle_private(client, acc, message, chatid, msgid)
         
+    except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+        raise
     except Exception as e:
+        error_str = str(e).lower()
+        if 'connection' in error_str or 'timeout' in error_str or 'lost' in error_str:
+            print(f"Connection error in supergroup handler for message {msgid}: {e}")
+            raise
         if ERROR_MESSAGE:
             await client.send_message(message.chat.id, f"Error in supergroup handler: {e}", reply_to_message_id=message.id)
 
 
 # handle private
 async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int):
-    msg: Message = await acc.get_messages(chatid, msgid)
+    await ensure_client_connected(acc)
+    
+    msg: Message = await retry_on_error(acc.get_messages, chatid, msgid)
     if not msg or msg.empty:
         return
     msg_type = get_message_type(msg)
@@ -354,7 +414,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 text_to_send = clean_caption(msg.text, user_settings) if msg.text else msg.text
                 entities_to_send = None
             
-            await client.send_message(destination_chat, text_to_send, entities=entities_to_send, parse_mode=enums.ParseMode.HTML)
+            await retry_on_error(client.send_message, destination_chat, text_to_send, entities=entities_to_send, parse_mode=enums.ParseMode.HTML)
             if destination_chat != chat:
                 await message.reply("✅ Sent to destination channel!")
             return
@@ -367,24 +427,15 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     smsg = await client.send_message(message.chat.id, "**Downloading**", reply_to_message_id=message.id)
     asyncio.create_task(downstatus(client, f"{message.id}downstatus.txt", smsg, chat))
     try:
-        file = await acc.download_media(msg, progress=progress, progress_args=[message, "down"])
+        file = await retry_on_error(acc.download_media, msg, progress=progress, progress_args=[message, "down"])
         if os.path.exists(f"{message.id}downstatus.txt"):
             os.remove(f"{message.id}downstatus.txt")
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        try:
-            file = await acc.download_media(msg, progress=progress, progress_args=[message, "down"])
-            if os.path.exists(f"{message.id}downstatus.txt"):
-                os.remove(f"{message.id}downstatus.txt")
-        except Exception as e:
-            if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-            await smsg.delete()
-            return
     except Exception as e:
         if ERROR_MESSAGE:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await client.send_message(message.chat.id, f"Error downloading: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
         await smsg.delete()
+        if os.path.exists(f"{message.id}downstatus.txt"):
+            os.remove(f"{message.id}downstatus.txt")
         return
 
     if batch_temp.IS_BATCH.get(message.from_user.id):
@@ -410,12 +461,13 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         ph_path = None
         try:
             if msg.document.thumbs:
-                ph_path = await acc.download_media(msg.document.thumbs[0].file_id)
+                ph_path = await retry_on_error(acc.download_media, msg.document.thumbs[0].file_id)
         except Exception:
             ph_path = None
 
         try:
-            await client.send_document(
+            await retry_on_error(
+                client.send_document,
                 destination_chat,
                 file,
                 thumb=ph_path,
@@ -441,12 +493,13 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         ph_path = None
         try:
             if msg.video.thumbs:
-                ph_path = await acc.download_media(msg.video.thumbs[0].file_id)
+                ph_path = await retry_on_error(acc.download_media, msg.video.thumbs[0].file_id)
         except Exception:
             ph_path = None
 
         try:
-            await client.send_video(
+            await retry_on_error(
+                client.send_video,
                 destination_chat,
                 file,
                 duration=getattr(msg.video, "duration", None),
@@ -473,7 +526,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     # Animation (gif)
     elif msg_type == "Animation":
         try:
-            await client.send_animation(destination_chat, file, caption=caption, parse_mode=enums.ParseMode.HTML)
+            await retry_on_error(client.send_animation, destination_chat, file, caption=caption, parse_mode=enums.ParseMode.HTML)
             if destination_chat != chat:
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
@@ -484,7 +537,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     # Sticker
     elif msg_type == "Sticker":
         try:
-            await client.send_sticker(destination_chat, file)
+            await retry_on_error(client.send_sticker, destination_chat, file)
             if destination_chat != chat:
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
@@ -496,7 +549,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     elif msg_type == "Voice":
         try:
             voice_entities = None if caption_was_cleaned else getattr(msg, "caption_entities", None)
-            await client.send_voice(
+            await retry_on_error(
+                client.send_voice,
                 destination_chat,
                 file,
                 caption=caption,
@@ -517,12 +571,13 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         ph_path = None
         try:
             if getattr(msg.audio, "thumbs", None):
-                ph_path = await acc.download_media(msg.audio.thumbs[0].file_id)
+                ph_path = await retry_on_error(acc.download_media, msg.audio.thumbs[0].file_id)
         except Exception:
             ph_path = None
 
         try:
-            await client.send_audio(
+            await retry_on_error(
+                client.send_audio,
                 destination_chat,
                 file,
                 thumb=ph_path,
@@ -546,7 +601,7 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     # Photo
     elif msg_type == "Photo":
         try:
-            await client.send_photo(destination_chat, file, caption=caption, parse_mode=enums.ParseMode.HTML)
+            await retry_on_error(client.send_photo, destination_chat, file, caption=caption, parse_mode=enums.ParseMode.HTML)
             if destination_chat != chat:
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
