@@ -332,13 +332,14 @@ async def handle_settings_input(client: Client, message: Message):
         
         # Validate the destination
         try:
+            # First, try to get chat info
             chat_info = await client.get_chat(channel)
             
             # Check if it's a channel or supergroup
             if chat_info.type in ["channel", "supergroup"]:
                 try:
                     # Check if bot is member and has permissions
-                    bot_member = await client.get_chat_member(channel, "me")
+                    bot_member = await client.get_chat_member(chat_info.id, "me")
                     
                     if bot_member.status == "administrator":
                         if not bot_member.privileges.can_post_messages:
@@ -387,60 +388,91 @@ async def handle_settings_input(client: Client, message: Message):
                     message.stop_propagation()
                     return
             
+            # For private chats/groups, we don't need admin checks
+            elif chat_info.type in ["group", "private"]:
+                # For groups, check if bot is member
+                try:
+                    await client.get_chat_member(chat_info.id, "me")
+                except UserNotParticipant:
+                    user_states.pop(user_id, None)
+                    await message.reply(
+                        f"❌ **Bot Not Added**\n\n"
+                        f"Bot is not a member of `{channel}`\n\n"
+                        f"Add bot to the group first and try again."
+                    )
+                    message.stop_propagation()
+                    return
+            
             # If all checks pass, save the destination
-            await db.set_destination_channel(user_id, channel)
+            # Store the chat ID instead of the input string for consistency
+            await db.set_destination_channel(user_id, str(chat_info.id))
             user_states.pop(user_id, None)
             
             # Get display name
-            if chat_info.username:
+            if hasattr(chat_info, 'username') and chat_info.username:
                 display_name = f"@{chat_info.username}"
-            elif chat_info.title:
+            elif hasattr(chat_info, 'title') and chat_info.title:
                 display_name = chat_info.title
             else:
-                display_name = channel
+                display_name = f"ID: {chat_info.id}"
             
             await message.reply(
                 f"✅ **Destination Set Successfully!**\n\n"
                 f"Channel: {display_name}\n"
-                f"ID: `{channel}`\n\n"
-                f"All batch uploads will now go to this channel.\n"
+                f"Type: {chat_info.type.title()}\n"
+                f"ID: `{chat_info.id}`\n\n"
+                f"All batch uploads will now go to this destination.\n"
                 f"Use /settings to change it again."
             )
             message.stop_propagation()
             
-        except PeerIdInvalid:
+        except (PeerIdInvalid, UsernameNotOccupied):
             user_states.pop(user_id, None)
             await message.reply(
-                f"❌ **Invalid Channel ID**\n\n"
-                f"`{channel}` is not a valid channel ID or username.\n\n"
+                f"❌ **Invalid Channel/Group**\n\n"
+                f"`{channel}` is not a valid channel/group ID or username.\n\n"
                 f"**Valid formats:**\n"
                 f"• @channelname\n"
-                f"• -1001234567890 (or -1002234567890 for newer channels)"
+                f"• -1001234567890\n"
+                f"• Regular group ID\n\n"
+                f"**Make sure:**\n"
+                f"• The channel/group exists\n"
+                f"• Bot is added to the channel/group\n"
+                f"• For channels: Bot has admin rights"
             )
             message.stop_propagation()
         except ChannelPrivate:
             user_states.pop(user_id, None)
             await message.reply(
-                f"❌ **Private Channel**\n\n"
+                f"❌ **Private Channel/Group**\n\n"
                 f"Cannot access `{channel}` - it's private.\n\n"
-                f"Add bot to the channel first."
-            )
-            message.stop_propagation()
-        except UsernameNotOccupied:
-            user_states.pop(user_id, None)
-            await message.reply(
-                f"❌ **Username Not Found**\n\n"
-                f"`{channel}` doesn't exist.\n\n"
-                f"Check the username and try again."
+                f"**Steps:**\n"
+                f"1. Add bot to the channel/group\n"
+                f"2. For channels: Make bot admin\n"
+                f"3. Try setting destination again"
             )
             message.stop_propagation()
         except Exception as e:
             user_states.pop(user_id, None)
-            await message.reply(
-                f"❌ **Error**\n\n"
-                f"Failed to set destination: {str(e)}\n\n"
-                f"Please try again or use /settings."
-            )
+            error_msg = str(e)
+            if "USER_NOT_PARTICIPANT" in error_msg or "user not participant" in error_msg.lower():
+                await message.reply(
+                    f"❌ **Bot Not Added**\n\n"
+                    f"Bot is not a member of `{channel}`\n\n"
+                    f"Add bot to the channel/group first and try again."
+                )
+            elif "CHAT_ADMIN_REQUIRED" in error_msg:
+                await message.reply(
+                    f"❌ **Admin Rights Required**\n\n"
+                    f"Bot needs admin rights in `{channel}`\n\n"
+                    f"Make bot admin with 'Post Messages' permission."
+                )
+            else:
+                await message.reply(
+                    f"❌ **Error**\n\n"
+                    f"Failed to set destination: {error_msg}\n\n"
+                    f"Please try again or use /settings."
+                )
             message.stop_propagation()
     
     elif state == 'awaiting_custom_word':
@@ -453,7 +485,7 @@ async def handle_settings_input(client: Client, message: Message):
             "Use /settings to manage your custom words."
         )
         message.stop_propagation()
-
+        
 def clean_caption(caption: str, settings: dict) -> str:
     if not caption:
         return caption
