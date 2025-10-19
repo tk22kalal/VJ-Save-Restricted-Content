@@ -28,10 +28,11 @@ class batch_temp(object):
     IS_BATCH = {}
 
 
-async def retry_on_error(func, *args, max_retries=5, initial_delay=3, **kwargs):
+async def retry_on_error(func, *args, max_retries=10, initial_delay=3, **kwargs):
     """
     Retry a function with exponential backoff for connection errors.
     Handles OSError, TimeoutError, and other network-related exceptions.
+    Now with 10 retries for maximum resilience during long batch operations.
     """
     for attempt in range(max_retries):
         try:
@@ -41,18 +42,20 @@ async def retry_on_error(func, *args, max_retries=5, initial_delay=3, **kwargs):
             await asyncio.sleep(e.value)
         except (OSError, TimeoutError, ConnectionError) as e:
             if attempt == max_retries - 1:
+                print(f"Failed after {max_retries} retries: {e}")
                 raise
-            delay = initial_delay * (2 ** attempt)
-            print(f"Connection error on attempt {attempt + 1}/{max_retries}: {e}. Retrying in {delay}s...")
+            delay = min(initial_delay * (2 ** attempt), 60)
+            print(f"Connection/Timeout error on attempt {attempt + 1}/{max_retries}: {e}. Retrying in {delay}s...")
             await asyncio.sleep(delay)
         except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
             raise
         except Exception as e:
             error_str = str(e).lower()
-            if any(keyword in error_str for keyword in ['timeout', 'connection', 'network', 'disconnect', 'lost']):
+            if any(keyword in error_str for keyword in ['timeout', 'connection', 'network', 'disconnect', 'lost', 'timed out']):
                 if attempt == max_retries - 1:
+                    print(f"Failed after {max_retries} retries: {e}")
                     raise
-                delay = initial_delay * (2 ** attempt)
+                delay = min(initial_delay * (2 ** attempt), 60)
                 print(f"Network-related error on attempt {attempt + 1}/{max_retries}: {e}. Retrying in {delay}s...")
                 await asyncio.sleep(delay)
             else:
