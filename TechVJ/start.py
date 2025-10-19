@@ -13,6 +13,7 @@ from pyrogram.errors import (
     UserAlreadyParticipant,
     InviteHashExpired,
     UsernameNotOccupied,
+    ChatWriteForbidden,
 )
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from config import API_ID, API_HASH, ERROR_MESSAGE, LOGIN_SYSTEM, STRING_SESSION
@@ -24,6 +25,21 @@ from bot import TechVJUser
 
 class batch_temp(object):
     IS_BATCH = {}
+
+
+def format_send_error(e: Exception, destination_chat) -> str:
+    """Format error messages for sending to destination channels"""
+    if isinstance(e, ChatWriteForbidden):
+        return (
+            "❌ **Bot Permission Error**\n\n"
+            f"Cannot send to destination channel `{destination_chat}`\n\n"
+            "**Required Actions:**\n"
+            "1. Add the bot to the channel\n"
+            "2. Promote bot to admin\n"
+            "3. Enable 'Post Messages' permission\n\n"
+            "Or use /settings to change the destination channel."
+        )
+    return f"Error: {e}"
 
 
 async def downstatus(client, statusfile, message, chat):
@@ -311,7 +327,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             return
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
             return
 
     smsg = await client.send_message(message.chat.id, "**Downloading**", reply_to_message_id=message.id)
@@ -367,7 +384,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
         if ph_path:
             try:
                 os.remove(ph_path)
@@ -400,7 +418,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
         if ph_path:
             try:
                 os.remove(ph_path)
@@ -415,7 +434,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
 
     # Sticker
     elif msg_type == "Sticker":
@@ -425,7 +445,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
 
     # Voice
     elif msg_type == "Voice":
@@ -444,7 +465,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
 
     # Audio
     elif msg_type == "Audio":
@@ -469,7 +491,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
         if ph_path:
             try:
                 os.remove(ph_path)
@@ -484,7 +507,8 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
                 await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                error_msg = format_send_error(e, destination_chat)
+                await client.send_message(message.chat.id, error_msg, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
 
     # cleanup
     try:
