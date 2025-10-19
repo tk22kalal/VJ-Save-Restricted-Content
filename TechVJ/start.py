@@ -214,6 +214,12 @@ async def save(client: Client, message: Message):
                 if is_supergroup and topic_id is not None and chatid is not None:
                     try:
                         await handle_private_supergroup(client, acc, message, chatid, topic_id, msgid)
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value)
+                        try:
+                            await handle_private_supergroup(client, acc, message, chatid, topic_id, msgid)
+                        except Exception:
+                            pass
                     except Exception as e:
                         if ERROR_MESSAGE:
                             await client.send_message(message.chat.id, f"Error processing supergroup message {msgid}: {e}", reply_to_message_id=message.id)
@@ -226,6 +232,12 @@ async def save(client: Client, message: Message):
                         return
                     try:
                         await handle_private(client, acc, message, chatid, msgid)
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value)
+                        try:
+                            await handle_private(client, acc, message, chatid, msgid)
+                        except Exception:
+                            pass
                     except Exception as e:
                         if ERROR_MESSAGE:
                             await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
@@ -235,6 +247,12 @@ async def save(client: Client, message: Message):
                 try:
                     username = datas[4]
                     await handle_private(client, acc, message, username, msgid)
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                    try:
+                        await handle_private(client, acc, message, username, msgid)
+                    except Exception:
+                        pass
                 except Exception as e:
                     if ERROR_MESSAGE:
                         await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
@@ -247,17 +265,32 @@ async def save(client: Client, message: Message):
                 except UsernameNotOccupied:
                     await client.send_message(message.chat.id, "The username is not occupied by anyone", reply_to_message_id=message.id)
                     return
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                    try:
+                        msg = await client.get_messages(username, msgid)
+                    except Exception:
+                        pass
                 try:
                     await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                    try:
+                        await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
+                    except Exception:
+                        pass
                 except Exception:
                     try:
                         await handle_private(client, acc, message, username, msgid)
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value)
+                        try:
+                            await handle_private(client, acc, message, username, msgid)
+                        except Exception:
+                            pass
                     except Exception as e:
                         if ERROR_MESSAGE:
                             await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-
-            # wait time between iterations
-            await asyncio.sleep(3)
 
         batch_temp.IS_BATCH[message.from_user.id] = True
         await message.reply("**✅ Batch download completed!**")
@@ -337,6 +370,17 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         file = await acc.download_media(msg, progress=progress, progress_args=[message, "down"])
         if os.path.exists(f"{message.id}downstatus.txt"):
             os.remove(f"{message.id}downstatus.txt")
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        try:
+            file = await acc.download_media(msg, progress=progress, progress_args=[message, "down"])
+            if os.path.exists(f"{message.id}downstatus.txt"):
+                os.remove(f"{message.id}downstatus.txt")
+        except Exception as e:
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await smsg.delete()
+            return
     except Exception as e:
         if ERROR_MESSAGE:
             await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
