@@ -28,7 +28,7 @@ class Bot(Client):
         """Periodic keepalive to prevent connection timeout during long operations"""
         while True:
             try:
-                await asyncio.sleep(600)
+                await asyncio.sleep(300)
                 if self.is_connected:
                     try:
                         await self.get_me()
