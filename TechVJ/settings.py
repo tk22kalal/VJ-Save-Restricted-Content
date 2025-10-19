@@ -254,7 +254,7 @@ async def settings_callback(client: Client, callback: CallbackQuery):
             "Send the channel username (with @) or channel ID now.\n\n"
             "**Examples:**\n"
             "• @mychannel\n"
-            "• -1001234567890\n\n"
+            "• -1001234567890 (or -1002... for newer channels)\n\n"
             "**Requirements:**\n"
             "• Bot must be admin in the channel\n"
             "• Bot needs 'Post Messages' permission\n\n"
@@ -415,7 +415,7 @@ async def handle_settings_input(client: Client, message: Message):
                 f"`{channel}` is not a valid channel ID or username.\n\n"
                 f"**Valid formats:**\n"
                 f"• @channelname\n"
-                f"• -1001234567890"
+                f"• -1001234567890 (or -1002234567890 for newer channels)"
             )
             message.stop_propagation()
         except ChannelPrivate:
