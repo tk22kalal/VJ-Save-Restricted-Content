@@ -18,6 +18,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from config import API_ID, API_HASH, ERROR_MESSAGE, LOGIN_SYSTEM, STRING_SESSION
 from database.db import db
 from TechVJ.strings import HELP_TXT
+from TechVJ.settings import clean_caption, clean_filename
 from bot import TechVJUser
 
 
@@ -283,13 +284,30 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     msg_type = get_message_type(msg)
     if not msg_type:
         return
+    
+    user_settings = await db.get_user_settings(message.from_user.id)
+    
+    if not should_process_message(msg_type, user_settings):
+        return
+    
     chat = message.chat.id
+    destination_chat = user_settings.get('destination_channel') or chat
+    
     if batch_temp.IS_BATCH.get(message.from_user.id):
         return
 
     if msg_type == "Text":
         try:
-            await client.send_message(chat, msg.text, entities=msg.entities, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            text_to_send = msg.text
+            entities_to_send = msg.entities
+            
+            if user_settings.get('caption_cleanup') and any(user_settings['caption_cleanup'].values()):
+                text_to_send = clean_caption(msg.text, user_settings) if msg.text else msg.text
+                entities_to_send = None
+            
+            await client.send_message(destination_chat, text_to_send, entities=entities_to_send, parse_mode=enums.ParseMode.HTML)
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
             return
         except Exception as e:
             if ERROR_MESSAGE:
@@ -314,6 +332,14 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     asyncio.create_task(upstatus(client, f"{message.id}upstatus.txt", smsg, chat))
 
     caption = msg.caption if msg.caption else None
+    caption_entities = None
+    caption_was_cleaned = False
+    
+    if caption:
+        cleaned_caption = clean_caption(caption, user_settings)
+        if cleaned_caption != caption:
+            caption_was_cleaned = True
+        caption = cleaned_caption
 
     if batch_temp.IS_BATCH.get(message.from_user.id):
         return
@@ -329,15 +355,16 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
         try:
             await client.send_document(
-                chat,
+                destination_chat,
                 file,
                 thumb=ph_path,
                 caption=caption,
-                reply_to_message_id=message.id,
                 parse_mode=enums.ParseMode.HTML,
                 progress=progress,
                 progress_args=[message, "up"],
             )
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -358,18 +385,19 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
         try:
             await client.send_video(
-                chat,
+                destination_chat,
                 file,
                 duration=getattr(msg.video, "duration", None),
                 width=getattr(msg.video, "width", None),
                 height=getattr(msg.video, "height", None),
                 thumb=ph_path,
                 caption=caption,
-                reply_to_message_id=message.id,
                 parse_mode=enums.ParseMode.HTML,
                 progress=progress,
                 progress_args=[message, "up"],
             )
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -382,7 +410,9 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     # Animation (gif)
     elif msg_type == "Animation":
         try:
-            await client.send_animation(chat, file, caption=caption, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await client.send_animation(destination_chat, file, caption=caption, parse_mode=enums.ParseMode.HTML)
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -390,7 +420,9 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     # Sticker
     elif msg_type == "Sticker":
         try:
-            await client.send_sticker(chat, file, reply_to_message_id=message.id)
+            await client.send_sticker(destination_chat, file)
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -398,16 +430,18 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     # Voice
     elif msg_type == "Voice":
         try:
+            voice_entities = None if caption_was_cleaned else getattr(msg, "caption_entities", None)
             await client.send_voice(
-                chat,
+                destination_chat,
                 file,
                 caption=caption,
-                caption_entities=getattr(msg, "caption_entities", None),
-                reply_to_message_id=message.id,
+                caption_entities=voice_entities,
                 parse_mode=enums.ParseMode.HTML,
                 progress=progress,
                 progress_args=[message, "up"],
             )
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -423,15 +457,16 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
         try:
             await client.send_audio(
-                chat,
+                destination_chat,
                 file,
                 thumb=ph_path,
                 caption=caption,
-                reply_to_message_id=message.id,
                 parse_mode=enums.ParseMode.HTML,
                 progress=progress,
                 progress_args=[message, "up"],
             )
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -444,7 +479,9 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
     # Photo
     elif msg_type == "Photo":
         try:
-            await client.send_photo(chat, file, caption=caption, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await client.send_photo(destination_chat, file, caption=caption, parse_mode=enums.ParseMode.HTML)
+            if destination_chat != chat:
+                await message.reply("✅ Sent to destination channel!")
         except Exception as e:
             if ERROR_MESSAGE:
                 await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
@@ -513,4 +550,30 @@ def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
             return "Text"
     except:
         pass
-    return None                                  
+    return None
+
+
+# check if message type matches filter
+def should_process_message(msg_type: str, settings: dict) -> bool:
+    if not msg_type:
+        return False
+    
+    file_filter = settings.get('file_type_filter', 'all')
+    
+    if file_filter == 'all':
+        return True
+    
+    msg_type_lower = msg_type.lower()
+    
+    if file_filter == 'video' and msg_type_lower in ['video', 'animation']:
+        return True
+    elif file_filter == 'document' and msg_type_lower == 'document':
+        return True
+    elif file_filter == 'photo' and msg_type_lower == 'photo':
+        return True
+    elif file_filter == 'audio' and msg_type_lower in ['audio', 'voice']:
+        return True
+    elif file_filter == 'text' and msg_type_lower == 'text':
+        return True
+    
+    return False                                  
