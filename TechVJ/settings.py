@@ -328,17 +328,46 @@ async def handle_settings_input(client: Client, message: Message):
         return
     
     if state == 'awaiting_destination':
-        channel = message.text.strip()
+        channel_input = message.text.strip()
         
         # Validate the destination
         try:
-            # First, try to get chat info
-            chat_info = await client.get_chat(channel)
+            # First, try to get chat info - this might fail if bot is not in channel
+            try:
+                chat_info = await client.get_chat(channel_input)
+            except (ChannelPrivate, UserNotParticipant):
+                # If bot is not in channel, we can't validate permissions but we can still store the ID
+                # Let the user know they need to add the bot
+                user_states.pop(user_id, None)
+                await message.reply(
+                    f"⚠️ **Bot Not in Channel**\n\n"
+                    f"I cannot access `{channel_input}` because I'm not a member.\n\n"
+                    f"**Please follow these steps:**\n"
+                    f"1. Add @{client.me.username} to your channel as **Administrator**\n"
+                    f"2. Give me **'Post Messages'** permission\n"
+                    f"3. Try setting the destination again with: `{channel_input}`\n\n"
+                    f"After you add me to the channel, I'll be able to verify the permissions."
+                )
+                message.stop_propagation()
+                return
+            except (PeerIdInvalid, UsernameNotOccupied):
+                user_states.pop(user_id, None)
+                await message.reply(
+                    f"❌ **Invalid Channel/Group**\n\n"
+                    f"`{channel_input}` is not a valid channel/group ID or username.\n\n"
+                    f"**Valid formats:**\n"
+                    f"• @channelname\n"
+                    f"• -1001234567890\n\n"
+                    f"**Make sure:**\n"
+                    f"• The channel/group exists\n"
+                    f"• You have the correct ID/username"
+                )
+                message.stop_propagation()
+                return
             
-            # Check if it's a channel or supergroup
+            # If we get here, bot is in the channel, now check permissions
             if chat_info.type in ["channel", "supergroup"]:
                 try:
-                    # Check if bot is member and has permissions
                     bot_member = await client.get_chat_member(chat_info.id, "me")
                     
                     if bot_member.status == "administrator":
@@ -346,8 +375,8 @@ async def handle_settings_input(client: Client, message: Message):
                             user_states.pop(user_id, None)
                             await message.reply(
                                 f"❌ **Permission Error**\n\n"
-                                f"Bot is admin in `{channel}` but doesn't have **'Post Messages'** permission.\n\n"
-                                f"**Fix:** Give bot 'Post Messages' permission and try again."
+                                f"I'm admin in `{channel_input}` but don't have **'Post Messages'** permission.\n\n"
+                                f"**Fix:** Please give me 'Post Messages' permission in the channel settings."
                             )
                             message.stop_propagation()
                             return
@@ -355,56 +384,41 @@ async def handle_settings_input(client: Client, message: Message):
                         user_states.pop(user_id, None)
                         await message.reply(
                             f"❌ **Admin Required**\n\n"
-                            f"Bot must be admin in `{channel}`\n\n"
-                            f"**Steps:**\n"
-                            f"1. Add bot to the channel\n"
-                            f"2. Promote bot to admin\n"
-                            f"3. Enable 'Post Messages' permission\n"
-                            f"4. Try setting destination again"
+                            f"I need to be **Administrator** in `{channel_input}`\n\n"
+                            f"**Please:**\n"
+                            f"1. Make me admin in the channel\n"
+                            f"2. Enable 'Post Messages' permission\n"
+                            f"3. Try again"
                         )
                         message.stop_propagation()
                         return
                         
-                except UserNotParticipant:
+                except Exception as e:
                     user_states.pop(user_id, None)
                     await message.reply(
-                        f"❌ **Bot Not Added**\n\n"
-                        f"Bot is not a member of `{channel}`\n\n"
-                        f"**Steps:**\n"
-                        f"1. Add bot to the channel\n"
-                        f"2. Promote bot to admin\n"
-                        f"3. Enable 'Post Messages' permission\n"
-                        f"4. Try again"
-                    )
-                    message.stop_propagation()
-                    return
-                except ChatAdminRequired:
-                    user_states.pop(user_id, None)
-                    await message.reply(
-                        f"❌ **Admin Rights Required**\n\n"
-                        f"Bot needs admin rights in `{channel}`\n\n"
-                        f"Make bot admin with 'Post Messages' permission."
+                        f"❌ **Permission Check Failed**\n\n"
+                        f"Could not verify permissions in `{channel_input}`\n\n"
+                        f"Error: {str(e)}\n\n"
+                        f"Please make sure I'm admin with 'Post Messages' permission."
                     )
                     message.stop_propagation()
                     return
             
-            # For private chats/groups, we don't need admin checks
-            elif chat_info.type in ["group", "private"]:
-                # For groups, check if bot is member
+            # For groups (not channels), we still need basic member check
+            elif chat_info.type == "group":
                 try:
                     await client.get_chat_member(chat_info.id, "me")
                 except UserNotParticipant:
                     user_states.pop(user_id, None)
                     await message.reply(
-                        f"❌ **Bot Not Added**\n\n"
-                        f"Bot is not a member of `{channel}`\n\n"
-                        f"Add bot to the group first and try again."
+                        f"❌ **Bot Not in Group**\n\n"
+                        f"I'm not a member of `{channel_input}`\n\n"
+                        f"Please add me to the group first."
                     )
                     message.stop_propagation()
                     return
             
             # If all checks pass, save the destination
-            # Store the chat ID instead of the input string for consistency
             await db.set_destination_channel(user_id, str(chat_info.id))
             user_states.pop(user_id, None)
             
@@ -418,60 +432,44 @@ async def handle_settings_input(client: Client, message: Message):
             
             await message.reply(
                 f"✅ **Destination Set Successfully!**\n\n"
-                f"Channel: {display_name}\n"
-                f"Type: {chat_info.type.title()}\n"
-                f"ID: `{chat_info.id}`\n\n"
+                f"**Channel:** {display_name}\n"
+                f"**Type:** {chat_info.type.title()}\n"
+                f"**ID:** `{chat_info.id}`\n\n"
                 f"All batch uploads will now go to this destination.\n"
                 f"Use /settings to change it again."
             )
             message.stop_propagation()
             
-        except (PeerIdInvalid, UsernameNotOccupied):
-            user_states.pop(user_id, None)
-            await message.reply(
-                f"❌ **Invalid Channel/Group**\n\n"
-                f"`{channel}` is not a valid channel/group ID or username.\n\n"
-                f"**Valid formats:**\n"
-                f"• @channelname\n"
-                f"• -1001234567890\n"
-                f"• Regular group ID\n\n"
-                f"**Make sure:**\n"
-                f"• The channel/group exists\n"
-                f"• Bot is added to the channel/group\n"
-                f"• For channels: Bot has admin rights"
-            )
-            message.stop_propagation()
-        except ChannelPrivate:
-            user_states.pop(user_id, None)
-            await message.reply(
-                f"❌ **Private Channel/Group**\n\n"
-                f"Cannot access `{channel}` - it's private.\n\n"
-                f"**Steps:**\n"
-                f"1. Add bot to the channel/group\n"
-                f"2. For channels: Make bot admin\n"
-                f"3. Try setting destination again"
-            )
-            message.stop_propagation()
         except Exception as e:
             user_states.pop(user_id, None)
             error_msg = str(e)
-            if "USER_NOT_PARTICIPANT" in error_msg or "user not participant" in error_msg.lower():
+            
+            if "CHANNEL_PRIVATE" in error_msg or "USER_NOT_PARTICIPANT" in error_msg:
                 await message.reply(
-                    f"❌ **Bot Not Added**\n\n"
-                    f"Bot is not a member of `{channel}`\n\n"
-                    f"Add bot to the channel/group first and try again."
+                    f"🔒 **Private Channel - Bot Access Required**\n\n"
+                    f"I cannot access `{channel_input}` because I'm not a member.\n\n"
+                    f"**To fix this:**\n"
+                    f"1. Go to your channel: `{channel_input}`\n"
+                    f"2. Add @{client.me.username} as **Administrator**\n"
+                    f"3. Enable **'Post Messages'** permission\n"
+                    f"4. Try setting the destination again\n\n"
+                    f"After you add me, I'll be able to set this as your destination."
                 )
             elif "CHAT_ADMIN_REQUIRED" in error_msg:
                 await message.reply(
                     f"❌ **Admin Rights Required**\n\n"
-                    f"Bot needs admin rights in `{channel}`\n\n"
-                    f"Make bot admin with 'Post Messages' permission."
+                    f"I need admin rights in `{channel_input}`\n\n"
+                    f"Please make me admin with 'Post Messages' permission."
                 )
             else:
                 await message.reply(
-                    f"❌ **Error**\n\n"
+                    f"❌ **Unexpected Error**\n\n"
                     f"Failed to set destination: {error_msg}\n\n"
-                    f"Please try again or use /settings."
+                    f"Please make sure:\n"
+                    f"• Channel ID is correct\n"
+                    f"• Bot is added to channel\n"
+                    f"• Bot has admin rights\n"
+                    f"• Try again or use /settings"
                 )
             message.stop_propagation()
     
@@ -480,7 +478,7 @@ async def handle_settings_input(client: Client, message: Message):
         await db.add_custom_remove_word(user_id, word)
         user_states.pop(user_id, None)
         await message.reply(
-            f"✅ Added custom word: {word}\n\n"
+            f"✅ Added custom word: `{word}`\n\n"
             "This word will be removed from filenames and captions.\n"
             "Use /settings to manage your custom words."
         )
