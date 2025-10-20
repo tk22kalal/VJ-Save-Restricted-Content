@@ -76,6 +76,22 @@ async def ensure_client_connected(client):
         return False
 
 
+async def recreate_session_client(user_id, api_id, api_hash):
+    """Recreate a user session client with fresh session from database"""
+    try:
+        session_string = await db.refresh_session(user_id)
+        if not session_string:
+            return None
+        
+        new_client = Client(f"user_{user_id}", session_string=session_string, api_hash=api_hash, api_id=api_id)
+        await new_client.start()
+        print(f"Successfully recreated session for user {user_id}")
+        return new_client
+    except Exception as e:
+        print(f"Failed to recreate session for user {user_id}: {e}")
+        return None
+
+
 def format_send_error(e: Exception, destination_chat) -> str:
     """Format error messages for sending to destination channels"""
     if isinstance(e, ChatWriteForbidden):
@@ -227,93 +243,225 @@ async def save(client: Client, message: Message):
         batch_temp.IS_BATCH[message.from_user.id] = False
         
         total_messages = toID - fromID + 1
-        await message.reply(f"**Starting batch download of {total_messages} message(s)...**")
         
-        for msgid in range(fromID, toID + 1):
-            if batch_temp.IS_BATCH.get(message.from_user.id):
-                break
-
-            # decide which account to use
-            if LOGIN_SYSTEM == True:
-                user_data = await db.get_session(message.from_user.id)
-                if user_data is None:
-                    await message.reply("**For Downloading Restricted Content You Have To /login First.**")
-                    batch_temp.IS_BATCH[message.from_user.id] = True
-                    return
+        batch_progress = await db.get_batch_progress(message.from_user.id)
+        start_from = fromID
+        
+        if batch_progress and batch_progress.get('chat_id') == str(chatid):
+            last_processed = batch_progress.get('last_processed', fromID - 1)
+            if last_processed >= fromID and last_processed < toID:
+                start_from = last_processed + 1
+                await message.reply(f"**Resuming batch from message {start_from} ({toID - start_from + 1} remaining)...**")
+        
+        if start_from == fromID:
+            await message.reply(f"**Starting batch download of {total_messages} message(s)...**")
+        
+        acc = None
+        session_failures = 0
+        max_session_failures = 3
+        
+        if LOGIN_SYSTEM == True:
+            user_data = await db.get_session(message.from_user.id)
+            if user_data is None:
+                await message.reply("**For Downloading Restricted Content You Have To /login First.**")
+                batch_temp.IS_BATCH[message.from_user.id] = True
+                return
+            try:
+                acc = Client(f"saverestricted_{message.from_user.id}", session_string=user_data, api_hash=API_HASH, api_id=API_ID)
+                await acc.start()
+            except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+                batch_temp.IS_BATCH[message.from_user.id] = True
+                await db.clear_batch_progress(message.from_user.id)
+                return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+            except Exception as e:
+                session_failures += 1
+                if ERROR_MESSAGE:
+                    await message.reply(f"**Connection issue on startup:** `{str(e)}`\n**Will retry during batch...**")
+                await asyncio.sleep(5)
                 try:
-                    acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID)
-                    await acc.start()
-                except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
-                    batch_temp.IS_BATCH[message.from_user.id] = True
-                    return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
-                except Exception as e:
-                    if ERROR_MESSAGE:
-                        await message.reply(f"**Error connecting to Telegram:** `{str(e)}`\n**Please try again. If the issue persists, try /logout and /login again.**")
-                    batch_temp.IS_BATCH[message.from_user.id] = True
-                    return
-            else:
-                if TechVJUser is None:
-                    batch_temp.IS_BATCH[message.from_user.id] = True
-                    await client.send_message(message.chat.id, f"**String Session is not Set**", reply_to_message_id=message.id)
-                    return
-                acc = TechVJUser
-
-            # private (/c/)
-            if "https://t.me/c/" in message.text:
-                if is_supergroup and topic_id is not None and chatid is not None:
-                    try:
-                        await retry_on_error(handle_private_supergroup, client, acc, message, chatid, topic_id, msgid)
-                    except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+                    acc = await recreate_session_client(message.from_user.id, API_ID, API_HASH)
+                    if acc is None:
                         batch_temp.IS_BATCH[message.from_user.id] = True
-                        return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+                        await db.clear_batch_progress(message.from_user.id)
+                        return await message.reply("**Unable to connect. Please try /logout and /login again.**")
+                except Exception:
+                    batch_temp.IS_BATCH[message.from_user.id] = True
+                    await db.clear_batch_progress(message.from_user.id)
+                    return await message.reply("**Unable to connect. Please try /logout and /login again.**")
+        else:
+            if TechVJUser is None:
+                batch_temp.IS_BATCH[message.from_user.id] = True
+                await client.send_message(message.chat.id, f"**String Session is not Set**", reply_to_message_id=message.id)
+                return
+            acc = TechVJUser
+        
+        processed_count = 0
+        success_count = 0
+        
+        try:
+            for msgid in range(start_from, toID + 1):
+                if batch_temp.IS_BATCH.get(message.from_user.id):
+                    await db.clear_batch_progress(message.from_user.id)
+                    break
+                
+                processed_count += 1
+
+                # Save progress every 10 messages
+                if processed_count % 10 == 0:
+                    await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
+                
+                # private (/c/)
+                if "https://t.me/c/" in message.text:
+                    if is_supergroup and topic_id is not None and chatid is not None:
+                        try:
+                            await retry_on_error(handle_private_supergroup, client, acc, message, chatid, topic_id, msgid)
+                            success_count += 1
+                        except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
+                        if session_failures < max_session_failures and LOGIN_SYSTEM:
+                            session_failures += 1
+                            print(f"Session expired, attempting to recreate (attempt {session_failures}/{max_session_failures})...")
+                            await message.reply(f"**🔄 Session reconnecting (attempt {session_failures}/{max_session_failures})...**")
+                            try:
+                                if acc and hasattr(acc, 'stop'):
+                                    await acc.stop()
+                            except:
+                                pass
+                            await asyncio.sleep(3)
+                            acc = await recreate_session_client(message.from_user.id, API_ID, API_HASH)
+                            if acc is None:
+                                await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
+                                await message.reply(f"**❌ Session recreation failed. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                                batch_temp.IS_BATCH[message.from_user.id] = True
+                                break
+                            else:
+                                await message.reply(f"**✅ Session reconnected! Continuing batch...**")
+                                continue
+                        else:
+                            await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
+                            await message.reply(f"**❌ Session expired. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                            batch_temp.IS_BATCH[message.from_user.id] = True
+                            break
                     except Exception as e:
                         error_str = str(e).lower()
-                        if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                        if 'connection' in error_str or 'timeout' in error_str or 'lost' in error_str:
+                            print(f"Connection error on message {msgid}, retrying with session recreation...")
+                            await asyncio.sleep(5)
+                            try:
+                                await ensure_client_connected(acc)
+                                await retry_on_error(handle_private_supergroup, client, acc, message, chatid, topic_id, msgid)
+                                success_count += 1
+                            except Exception as retry_err:
+                                print(f"Retry failed for message {msgid}: {retry_err}")
+                                if ERROR_MESSAGE:
+                                    await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to persistent connection issues. Continuing...", reply_to_message_id=message.id)
+                                continue
+                        else:
                             if ERROR_MESSAGE:
                                 await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
-                        else:
-                            print(f"Failed to process message {msgid} after retries: {e}")
-                            if ERROR_MESSAGE:
-                                await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
+                            continue
                 else:
                     try:
                         if chatid is None:
                             chatid = int("-100" + datas[4])
                     except Exception:
                         await client.send_message(message.chat.id, "**Unable to parse private chat link**", reply_to_message_id=message.id)
-                        return
+                        continue
                     try:
                         await retry_on_error(handle_private, client, acc, message, chatid, msgid)
+                        success_count += 1
                     except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
-                        batch_temp.IS_BATCH[message.from_user.id] = True
-                        return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+                        if session_failures < max_session_failures and LOGIN_SYSTEM:
+                            session_failures += 1
+                            print(f"Session expired, attempting to recreate (attempt {session_failures}/{max_session_failures})...")
+                            await message.reply(f"**🔄 Session reconnecting (attempt {session_failures}/{max_session_failures})...**")
+                            try:
+                                if acc and hasattr(acc, 'stop'):
+                                    await acc.stop()
+                            except:
+                                pass
+                            await asyncio.sleep(3)
+                            acc = await recreate_session_client(message.from_user.id, API_ID, API_HASH)
+                            if acc is None:
+                                await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
+                                await message.reply(f"**❌ Session recreation failed. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                                batch_temp.IS_BATCH[message.from_user.id] = True
+                                break
+                            else:
+                                await message.reply(f"**✅ Session reconnected! Continuing batch...**")
+                                continue
+                        else:
+                            await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
+                            await message.reply(f"**❌ Session expired. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                            batch_temp.IS_BATCH[message.from_user.id] = True
+                            break
                     except Exception as e:
                         error_str = str(e).lower()
-                        if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                        if 'connection' in error_str or 'timeout' in error_str or 'lost' in error_str:
+                            print(f"Connection error on message {msgid}, retrying...")
+                            await asyncio.sleep(5)
+                            try:
+                                await ensure_client_connected(acc)
+                                await retry_on_error(handle_private, client, acc, message, chatid, msgid)
+                                success_count += 1
+                            except Exception as retry_err:
+                                print(f"Retry failed for message {msgid}: {retry_err}")
+                                if ERROR_MESSAGE:
+                                    await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to persistent connection issues. Continuing...", reply_to_message_id=message.id)
+                                continue
+                        else:
                             if ERROR_MESSAGE:
                                 await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
-                        else:
-                            print(f"Failed to process message {msgid} after retries: {e}")
-                            if ERROR_MESSAGE:
-                                await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
+                            continue
 
             # bot (/b/)
             elif "https://t.me/b/" in message.text:
                 try:
                     username = datas[4]
                     await retry_on_error(handle_private, client, acc, message, username, msgid)
+                    success_count += 1
                 except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
-                    batch_temp.IS_BATCH[message.from_user.id] = True
-                    return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+                    if session_failures < max_session_failures and LOGIN_SYSTEM:
+                        session_failures += 1
+                        print(f"Session expired, attempting to recreate (attempt {session_failures}/{max_session_failures})...")
+                        await message.reply(f"**🔄 Session reconnecting (attempt {session_failures}/{max_session_failures})...**")
+                        try:
+                            if acc and hasattr(acc, 'stop'):
+                                await acc.stop()
+                        except:
+                            pass
+                        await asyncio.sleep(3)
+                        acc = await recreate_session_client(message.from_user.id, API_ID, API_HASH)
+                        if acc is None:
+                            await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
+                            await message.reply(f"**❌ Session recreation failed. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                            batch_temp.IS_BATCH[message.from_user.id] = True
+                            break
+                        else:
+                            await message.reply(f"**✅ Session reconnected! Continuing batch...**")
+                            continue
+                    else:
+                        await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
+                        await message.reply(f"**❌ Session expired. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                        batch_temp.IS_BATCH[message.from_user.id] = True
+                        break
                 except Exception as e:
                     error_str = str(e).lower()
-                    if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                    if 'connection' in error_str or 'timeout' in error_str or 'lost' in error_str:
+                        print(f"Connection error on message {msgid}, retrying...")
+                        await asyncio.sleep(5)
+                        try:
+                            await ensure_client_connected(acc)
+                            await retry_on_error(handle_private, client, acc, message, username, msgid)
+                            success_count += 1
+                        except Exception as retry_err:
+                            print(f"Retry failed for message {msgid}: {retry_err}")
+                            if ERROR_MESSAGE:
+                                await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to persistent connection issues. Continuing...", reply_to_message_id=message.id)
+                            continue
+                    else:
                         if ERROR_MESSAGE:
                             await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
-                    else:
-                        print(f"Failed to process message {msgid} after retries: {e}")
-                        if ERROR_MESSAGE:
-                            await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
+                        continue
 
             # public
             else:
@@ -322,31 +470,72 @@ async def save(client: Client, message: Message):
                     msg = await retry_on_error(client.get_messages, username, msgid)
                 except UsernameNotOccupied:
                     await client.send_message(message.chat.id, "The username is not occupied by anyone", reply_to_message_id=message.id)
-                    return
+                    continue
                 except Exception as e:
                     if ERROR_MESSAGE:
                         await client.send_message(message.chat.id, f"Error getting message {msgid}: {e}", reply_to_message_id=message.id)
                     continue
                 try:
                     await retry_on_error(client.copy_message, message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
+                    success_count += 1
                 except Exception:
                     try:
                         await retry_on_error(handle_private, client, acc, message, username, msgid)
+                        success_count += 1
                     except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
-                        batch_temp.IS_BATCH[message.from_user.id] = True
-                        return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
+                        if session_failures < max_session_failures and LOGIN_SYSTEM:
+                            session_failures += 1
+                            print(f"Session expired, attempting to recreate (attempt {session_failures}/{max_session_failures})...")
+                            await message.reply(f"**🔄 Session reconnecting (attempt {session_failures}/{max_session_failures})...**")
+                            try:
+                                if acc and hasattr(acc, 'stop'):
+                                    await acc.stop()
+                            except:
+                                pass
+                            await asyncio.sleep(3)
+                            acc = await recreate_session_client(message.from_user.id, API_ID, API_HASH)
+                            if acc is None:
+                                await db.save_batch_progress(message.from_user.id, str(chatid if chatid else username), msgid - 1, total_messages)
+                                await message.reply(f"**❌ Session recreation failed. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                                batch_temp.IS_BATCH[message.from_user.id] = True
+                                break
+                            else:
+                                await message.reply(f"**✅ Session reconnected! Continuing batch...**")
+                                continue
+                        else:
+                            await db.save_batch_progress(message.from_user.id, str(chatid if chatid else username), msgid - 1, total_messages)
+                            await message.reply(f"**❌ Session expired. Progress saved at message {msgid - 1}. Please /logout and /login again, then resend the batch link to resume.**")
+                            batch_temp.IS_BATCH[message.from_user.id] = True
+                            break
                     except Exception as e:
                         error_str = str(e).lower()
-                        if 'connection' not in error_str and 'timeout' not in error_str and 'lost' not in error_str:
+                        if 'connection' in error_str or 'timeout' in error_str or 'lost' in error_str:
+                            print(f"Connection error on message {msgid}, retrying...")
+                            await asyncio.sleep(5)
+                            try:
+                                await ensure_client_connected(acc)
+                                await retry_on_error(handle_private, client, acc, message, username, msgid)
+                                success_count += 1
+                            except Exception as retry_err:
+                                print(f"Retry failed for message {msgid}: {retry_err}")
+                                if ERROR_MESSAGE:
+                                    await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to persistent connection issues. Continuing...", reply_to_message_id=message.id)
+                                continue
+                        else:
                             if ERROR_MESSAGE:
                                 await client.send_message(message.chat.id, f"Error processing message {msgid}: {e}", reply_to_message_id=message.id)
-                        else:
-                            print(f"Failed to process message {msgid} after retries: {e}")
-                            if ERROR_MESSAGE:
-                                await client.send_message(message.chat.id, f"⚠️ Skipped message {msgid} due to connection issues. Continuing with batch...", reply_to_message_id=message.id)
+                            continue
 
+        if LOGIN_SYSTEM and acc and hasattr(acc, 'stop'):
+            try:
+                await acc.stop()
+            except:
+                pass
+        
         batch_temp.IS_BATCH[message.from_user.id] = True
-        await message.reply("**✅ Batch download completed!**")
+        await db.clear_batch_progress(message.from_user.id)
+        failed_count = processed_count - success_count
+        await message.reply(f"**✅ Batch download completed!**\n\n**Processed:** {processed_count}/{total_messages}\n**Success:** {success_count}\n**Failed/Skipped:** {failed_count}")
 
 
 # handle private supergroup with topic/sub-group filtering
@@ -441,7 +630,53 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
             os.remove(f"{message.id}downstatus.txt")
         return
 
+    if not file or not os.path.exists(file):
+        if ERROR_MESSAGE:
+            await client.send_message(message.chat.id, "**Download failed - file not found. Retrying...**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+        await smsg.delete()
+        try:
+            await asyncio.sleep(2)
+            file = await retry_on_error(acc.download_media, msg, progress=progress, progress_args=[message, "down"])
+            if not file or not os.path.exists(file):
+                if ERROR_MESSAGE:
+                    await client.send_message(message.chat.id, "**Download failed after retry - file not available**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                return
+        except Exception as retry_err:
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"**Download retry failed:** {retry_err}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            return
+    
+    file_size = os.path.getsize(file) if os.path.exists(file) else 0
+    if file_size == 0:
+        if ERROR_MESSAGE:
+            await client.send_message(message.chat.id, "**Downloaded file is 0 bytes. Retrying with fresh download...**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+        try:
+            os.remove(file)
+        except:
+            pass
+        await smsg.delete()
+        try:
+            await asyncio.sleep(3)
+            await ensure_client_connected(acc)
+            smsg = await client.send_message(message.chat.id, "**Re-downloading...**", reply_to_message_id=message.id)
+            file = await retry_on_error(acc.download_media, msg, progress=progress, progress_args=[message, "down"])
+            if not file or not os.path.exists(file) or os.path.getsize(file) == 0:
+                if ERROR_MESSAGE:
+                    await client.send_message(message.chat.id, "**Unable to download file - file appears empty or corrupted**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                await smsg.delete()
+                return
+        except Exception as retry_err:
+            if ERROR_MESSAGE:
+                await client.send_message(message.chat.id, f"**Re-download failed:** {retry_err}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+            await smsg.delete()
+            return
+
     if batch_temp.IS_BATCH.get(message.from_user.id):
+        if file and os.path.exists(file):
+            try:
+                os.remove(file)
+            except:
+                pass
         return
 
     asyncio.create_task(upstatus(client, f"{message.id}upstatus.txt", smsg, chat))
