@@ -113,4 +113,34 @@ class Database:
         }
         await self.update_user_settings(id, default_settings)
 
+    async def save_batch_progress(self, user_id, chat_id, last_processed_msg_id, total_messages):
+        await self.col.update_one(
+            {'id': int(user_id)},
+            {'$set': {
+                'batch_progress': {
+                    'chat_id': chat_id,
+                    'last_processed': last_processed_msg_id,
+                    'total': total_messages
+                }
+            }}
+        )
+
+    async def get_batch_progress(self, user_id):
+        user = await self.col.find_one({'id': int(user_id)})
+        if user and 'batch_progress' in user:
+            return user['batch_progress']
+        return None
+
+    async def clear_batch_progress(self, user_id):
+        await self.col.update_one(
+            {'id': int(user_id)},
+            {'$unset': {'batch_progress': ''}}
+        )
+
+    async def refresh_session(self, user_id):
+        user = await self.col.find_one({'id': int(user_id)})
+        if user and user.get('session'):
+            return user.get('session')
+        return None
+
 db = Database(DB_URI, DB_NAME)
