@@ -11,5 +11,14 @@ from TechVJ.commands import send_start, send_help, send_cancel
 # Import batch download handler with error tracking
 from TechVJ.batch_handler import save
 
+# Import login/logout handlers
+import TechVJ.generate
+
+# Import settings handlers
+import TechVJ.settings
+
+# Import broadcast handlers
+import TechVJ.broadcast
+
 # All handlers are automatically registered via decorators
 # No need for additional registration here
