@@ -78,26 +78,55 @@ class OptimizedBatchProcessor:
                 except Exception as e:
                     return "error", f"Text send failed: {str(e)}", "text", 0, 0
             
-            # Download file
+            # Download file with retry logic for 0-byte files
             start_time = time.time()
+            file = None
+            max_download_retries = 3
             
-            # Create status file for download progress
-            status_file = f"{user_message.id}downstatus.txt"
-            try:
-                file = await acc.download_media(
-                    msg, 
-                    progress=self.progress, 
-                    progress_args=(user_message, "down")
-                )
-            except Exception as e:
-                return "error", f"Download failed: {str(e)}", msg_type.lower(), 0, 0
+            for download_attempt in range(max_download_retries):
+                try:
+                    file = await acc.download_media(
+                        msg, 
+                        progress=self.progress, 
+                        progress_args=(user_message, "down")
+                    )
+                    
+                    # Validate file exists and has content
+                    if not file or not os.path.exists(file):
+                        if download_attempt < max_download_retries - 1:
+                            await asyncio.sleep(2)
+                            continue
+                        return "error", "Download failed - file not found", msg_type.lower(), 0, 0
+                    
+                    file_size = os.path.getsize(file)
+                    
+                    # Check for 0-byte file
+                    if file_size == 0:
+                        if download_attempt < max_download_retries - 1:
+                            # Remove 0-byte file and retry
+                            try:
+                                os.remove(file)
+                            except:
+                                pass
+                            await asyncio.sleep(3)
+                            continue
+                        # Clean up empty file on final failure
+                        try:
+                            os.remove(file)
+                        except:
+                            pass
+                        return "error", "File size equals to 0 B - file appears empty or corrupted", msg_type.lower(), 0, 0
+                    
+                    # File is valid, break out of retry loop
+                    break
+                    
+                except Exception as e:
+                    if download_attempt < max_download_retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+                    return "error", f"Download failed: {str(e)}", msg_type.lower(), 0, 0
             
             download_time = time.time() - start_time
-            
-            if not file or not os.path.exists(file):
-                return "error", "Download failed - file not found", msg_type.lower(), 0, 0
-            
-            file_size = os.path.getsize(file) if os.path.exists(file) else 0
             download_speed = file_size / download_time if download_time > 0 else 0
             
             # Clean caption
@@ -138,6 +167,14 @@ class OptimizedBatchProcessor:
     
     async def upload_media(self, client: Client, acc, chat_id, file: str, msg, msg_type: str, caption: str, user_message: Message):
         try:
+            # Validate file path before uploading
+            if not file or not os.path.exists(file):
+                return "error", f"Failed to decode \"{file}\". The value does not represent an existing local file, HTTP URL, or valid file id."
+            
+            # Check file size before uploading
+            if os.path.getsize(file) == 0:
+                return "error", "File size equals to 0 B - cannot upload empty file"
+            
             # Use reply_to_message_id only when sending to user's chat
             reply_to_id = user_message.id if chat_id == user_message.chat.id else None
             
