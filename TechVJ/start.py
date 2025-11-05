@@ -624,58 +624,70 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
 
     smsg = await client.send_message(message.chat.id, "**Downloading**", reply_to_message_id=message.id)
     asyncio.create_task(downstatus(client, f"{message.id}downstatus.txt", smsg, chat))
-    try:
-        file = await retry_on_error(acc.download_media, msg, progress=progress, progress_args=[message, "down"])
-        if os.path.exists(f"{message.id}downstatus.txt"):
-            os.remove(f"{message.id}downstatus.txt")
-    except Exception as e:
-        if ERROR_MESSAGE:
-            await client.send_message(message.chat.id, f"Error downloading: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-        await smsg.delete()
-        if os.path.exists(f"{message.id}downstatus.txt"):
-            os.remove(f"{message.id}downstatus.txt")
-        return
-
-    if not file or not os.path.exists(file):
-        if ERROR_MESSAGE:
-            await client.send_message(message.chat.id, "**Download failed - file not found. Retrying...**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-        await smsg.delete()
-        try:
-            await asyncio.sleep(2)
-            file = await retry_on_error(acc.download_media, msg, progress=progress, progress_args=[message, "down"])
-            if not file or not os.path.exists(file):
-                if ERROR_MESSAGE:
-                    await client.send_message(message.chat.id, "**Download failed after retry - file not available**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-                return
-        except Exception as retry_err:
-            if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"**Download retry failed:** {retry_err}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-            return
     
-    file_size = os.path.getsize(file) if os.path.exists(file) else 0
-    if file_size == 0:
-        if ERROR_MESSAGE:
-            await client.send_message(message.chat.id, "**Downloaded file is 0 bytes. Retrying with fresh download...**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+    # Download with up to 3 retries for 0-byte files
+    file = None
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            os.remove(file)
-        except:
-            pass
-        await smsg.delete()
-        try:
-            await asyncio.sleep(3)
-            await ensure_client_connected(acc)
-            smsg = await client.send_message(message.chat.id, "**Re-downloading...**", reply_to_message_id=message.id)
             file = await retry_on_error(acc.download_media, msg, progress=progress, progress_args=[message, "down"])
-            if not file or not os.path.exists(file) or os.path.getsize(file) == 0:
+            if os.path.exists(f"{message.id}downstatus.txt"):
+                os.remove(f"{message.id}downstatus.txt")
+            
+            # Validate file exists
+            if not file or not os.path.exists(file):
+                if attempt < max_retries - 1:
+                    if ERROR_MESSAGE and attempt == 0:
+                        await client.send_message(message.chat.id, f"**Download attempt {attempt + 1} failed - file not found. Retrying...**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                    await asyncio.sleep(2)
+                    continue
+                else:
+                    if ERROR_MESSAGE:
+                        await client.send_message(message.chat.id, "**Download failed after 3 attempts - file not available**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                    await smsg.delete()
+                    return
+            
+            # Check for 0-byte file
+            file_size = os.path.getsize(file) if os.path.exists(file) else 0
+            if file_size == 0:
+                if attempt < max_retries - 1:
+                    # Remove 0-byte file and retry
+                    try:
+                        os.remove(file)
+                    except:
+                        pass
+                    if ERROR_MESSAGE and attempt == 0:
+                        await client.send_message(message.chat.id, f"**Downloaded file is 0 bytes. Retrying (attempt {attempt + 2}/{max_retries})...**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                    await asyncio.sleep(3)
+                    await ensure_client_connected(acc)
+                    continue
+                else:
+                    # Final attempt failed - clean up and return
+                    try:
+                        os.remove(file)
+                    except:
+                        pass
+                    if ERROR_MESSAGE:
+                        await client.send_message(message.chat.id, "**Unable to download file after 3 attempts - file appears empty or corrupted**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                    await smsg.delete()
+                    return
+            
+            # File is valid - break out of retry loop
+            break
+            
+        except Exception as e:
+            if os.path.exists(f"{message.id}downstatus.txt"):
+                os.remove(f"{message.id}downstatus.txt")
+            if attempt < max_retries - 1:
                 if ERROR_MESSAGE:
-                    await client.send_message(message.chat.id, "**Unable to download file - file appears empty or corrupted**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                    await client.send_message(message.chat.id, f"**Download error on attempt {attempt + 1}: {e}. Retrying...**", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+                await asyncio.sleep(2)
+                continue
+            else:
+                if ERROR_MESSAGE:
+                    await client.send_message(message.chat.id, f"**Download failed after 3 attempts:** {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
                 await smsg.delete()
                 return
-        except Exception as retry_err:
-            if ERROR_MESSAGE:
-                await client.send_message(message.chat.id, f"**Re-download failed:** {retry_err}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-            await smsg.delete()
-            return
 
     if batch_temp.IS_BATCH.get(message.from_user.id):
         if file and os.path.exists(file):
@@ -698,6 +710,23 @@ async def handle_private(client: Client, acc, message: Message, chatid: int, msg
         caption = cleaned_caption
 
     if batch_temp.IS_BATCH.get(message.from_user.id):
+        return
+    
+    # Final validation before upload - prevent "Failed to decode" errors
+    if not file or not os.path.exists(file):
+        if ERROR_MESSAGE:
+            await client.send_message(message.chat.id, f"**Upload failed:** File path is invalid or file was deleted", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+        await smsg.delete()
+        return
+    
+    if os.path.getsize(file) == 0:
+        if ERROR_MESSAGE:
+            await client.send_message(message.chat.id, "**Upload failed:** File size is 0 bytes - cannot upload empty file", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
+        try:
+            os.remove(file)
+        except:
+            pass
+        await smsg.delete()
         return
 
     # Document
