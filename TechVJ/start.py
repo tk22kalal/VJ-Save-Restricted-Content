@@ -117,10 +117,12 @@ def progress(current, total, message, type):
         fileup.write(f"{current * 100 / total:.1f}%")
 
 
-def build_msg_link(chatid, msgid):
-    """Build a Telegram message link from a chat id and message id."""
+def build_msg_link(chatid, msgid, toID=None):
+    """Build a Telegram message link, optionally showing the full batch range."""
     if chatid:
         clean_id = str(chatid).replace("-100", "")
+        if toID and toID != msgid:
+            return f"https://t.me/c/{clean_id}/{msgid}-{toID}"
         return f"https://t.me/c/{clean_id}/{msgid}"
     return ""
 
@@ -164,6 +166,68 @@ async def send_help(client: Client, message: Message):
 async def send_cancel(client: Client, message: Message):
     batch_temp.IS_BATCH[message.from_user.id] = True
     await client.send_message(chat_id=message.chat.id, text="**Batch Successfully Cancelled.**")
+
+
+# speedtest command
+@Client.on_message(filters.command(["speedtest"]))
+async def speedtest_cmd(client: Client, message: Message):
+    size_mb = 5
+    size_bytes = size_mb * 1024 * 1024
+    test_file = f"speedtest_{message.from_user.id}.bin"
+
+    status_msg = await message.reply("**🚀 Speed Test Starting...**\n\nGenerating test file...")
+
+    try:
+        with open(test_file, "wb") as f:
+            f.write(os.urandom(size_bytes))
+
+        # Upload test
+        await status_msg.edit("**🚀 Running Speed Test...**\n\n📤 Testing upload speed...")
+        up_start = time.time()
+        sent = await client.send_document(
+            message.chat.id,
+            test_file,
+            caption=f"⚡ Speed test file ({size_mb} MB) — will be deleted automatically",
+        )
+        up_elapsed = time.time() - up_start
+        up_speed = (size_bytes / up_elapsed) / (1024 * 1024)
+
+        # Download test
+        await status_msg.edit("**🚀 Running Speed Test...**\n\n📥 Testing download speed...")
+        down_start = time.time()
+        downloaded = await client.download_media(sent)
+        down_elapsed = time.time() - down_start
+        down_speed = (size_bytes / down_elapsed) / (1024 * 1024)
+
+        # Cleanup the sent file message
+        try:
+            await sent.delete()
+        except:
+            pass
+        if downloaded and os.path.exists(downloaded):
+            try:
+                os.remove(downloaded)
+            except:
+                pass
+
+        result = (
+            f"**🚀 Speed Test Results**\n\n"
+            f"📁 **File Size:** {size_mb} MB\n\n"
+            f"📤 **Upload Speed:** `{up_speed:.2f} MB/s`\n"
+            f"   ⏱ Time taken: `{up_elapsed:.2f}s`\n\n"
+            f"📥 **Download Speed:** `{down_speed:.2f} MB/s`\n"
+            f"   ⏱ Time taken: `{down_elapsed:.2f}s`"
+        )
+        await status_msg.edit(result)
+
+    except Exception as e:
+        await status_msg.edit(f"**❌ Speed test failed:** `{e}`")
+    finally:
+        if os.path.exists(test_file):
+            try:
+                os.remove(test_file)
+            except:
+                pass
 
 
 @Client.on_message(filters.text & filters.private)
@@ -281,7 +345,7 @@ async def save(client: Client, message: Message):
                 if "https://t.me/c/" in message.text:
                     if is_supergroup and topic_id is not None and chatid is not None:
                         try:
-                            await retry_on_error(handle_private_supergroup, client, acc, message, chatid, topic_id, msgid)
+                            await retry_on_error(handle_private_supergroup, client, acc, message, chatid, topic_id, msgid, toID)
                             success_count += 1
                         except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
                             await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
@@ -300,7 +364,7 @@ async def save(client: Client, message: Message):
                             await client.send_message(message.chat.id, "**Unable to parse private chat link**", reply_to_message_id=message.id)
                             continue
                         try:
-                            await retry_on_error(handle_private, client, acc, message, chatid, msgid)
+                            await retry_on_error(handle_private, client, acc, message, chatid, msgid, toID)
                             success_count += 1
                         except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
                             await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
@@ -316,7 +380,7 @@ async def save(client: Client, message: Message):
                 elif "https://t.me/b/" in message.text:
                     username = datas[4]
                     try:
-                        await retry_on_error(handle_private, client, acc, message, username, msgid)
+                        await retry_on_error(handle_private, client, acc, message, username, msgid, toID)
                         success_count += 1
                     except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
                         await db.save_batch_progress(message.from_user.id, str(chatid), msgid - 1, total_messages)
@@ -345,7 +409,7 @@ async def save(client: Client, message: Message):
                         success_count += 1
                     except Exception:
                         try:
-                            await retry_on_error(handle_private, client, acc, message, username, msgid)
+                            await retry_on_error(handle_private, client, acc, message, username, msgid, toID)
                             success_count += 1
                         except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
                             await db.save_batch_progress(message.from_user.id, str(chatid if chatid else username), msgid - 1, total_messages)
@@ -377,7 +441,7 @@ async def save(client: Client, message: Message):
 
 
 # handle private supergroup with topic/sub-group filtering
-async def handle_private_supergroup(client: Client, acc, message: Message, chatid: int, topic_id: int, msgid: int):
+async def handle_private_supergroup(client: Client, acc, message: Message, chatid: int, topic_id: int, msgid: int, toID: int = None):
     try:
         msg: Message = await retry_on_error(acc.get_messages, chatid, msgid)
         
@@ -398,7 +462,7 @@ async def handle_private_supergroup(client: Client, acc, message: Message, chati
         if msg_topic_id != topic_id:
             return
         
-        await handle_private(client, acc, message, chatid, msgid)
+        await handle_private(client, acc, message, chatid, msgid, toID)
         
     except (pyrogram.errors.AuthKeyUnregistered, pyrogram.errors.AuthKeyInvalid, pyrogram.errors.SessionRevoked):
         raise
@@ -408,7 +472,7 @@ async def handle_private_supergroup(client: Client, acc, message: Message, chati
 
 
 # handle private
-async def handle_private(client: Client, acc, message: Message, chatid, msgid: int):
+async def handle_private(client: Client, acc, message: Message, chatid, msgid: int, toID: int = None):
     os.makedirs("downloads", exist_ok=True)
 
     msg: Message = await retry_on_error(acc.get_messages, chatid, msgid)
@@ -430,7 +494,7 @@ async def handle_private(client: Client, acc, message: Message, chatid, msgid: i
         return
 
     # Build message link for status display
-    msg_link = build_msg_link(chatid, msgid) if isinstance(chatid, int) else ""
+    msg_link = build_msg_link(chatid, msgid, toID) if isinstance(chatid, int) else ""
 
     if msg_type == "Text":
         try:
